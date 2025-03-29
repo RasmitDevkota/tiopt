@@ -1,13 +1,13 @@
-#include <verlet.h>
-#include <ti_utils.h>
+#include "verlet.h"
+#include "ti_utils.h"
 
 #include <stdlib.h>
 #include <stdio.h>
 
-int velocity_verlet(
+void velocity_verlet(
 	const double m,
 	const double q,
-	const double V_len,
+	const int V_len,
 	double (*V)[V_len], // @TODO - do we need to pass the Trap instead since we only store V for each electrode separately?
 	double (*pos)[3],
 	double (*vel)[3],
@@ -22,7 +22,7 @@ int velocity_verlet(
 
 	for (int t = 0; t < n_it; t++)
 	{
-		velocity_verlet_update(m, q, V, grad_V, pos, vel, acc, dt);
+		velocity_verlet_update(m, q, V_len, V, grad_V, pos, vel, acc, dt);
 
 		printf("Position at step %d, time %f: (%f,%f,%f)\n", t, (double)(t+1) * dt, (*pos)[0], (*pos)[1], (*pos)[2]);
 	}
@@ -51,7 +51,7 @@ void velocity_verlet_update(
 	double (*new_acc)[3] = malloc((size_t) 3 * sizeof(double));
 	for (int k = 0; k < 3; k++)
 	{
-		(*new_acc)[k] = -q * (*grad_V)/m;
+		(*new_acc)[k] = -q * (*grad_V)[k]/m;
 	}
 
 	for (int k = 0; k < 3; k++)
