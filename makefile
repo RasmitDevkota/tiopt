@@ -16,10 +16,10 @@ SHWRAPPER_LIBS = -L$(SHTOOLS_LIB_DIR) -lwrapper
 SHTOOLS_LIBS = -L$(SHTOOLS_LIB_DIR) -lSHTOOLS
 
 # Source files
-C_SRC = main.c verlet.c sph.c ti_utils.c
+C_SRC = main_2.c verlet.c sph.c ti_utils.c
 
 # Object files
-C_OBJ = main.o verlet.o sph.o ti_utils.o
+C_OBJ = main_2.o verlet.o sph.o ti_utils.o
 
 # Output binary
 OUTPUT = tiopt
