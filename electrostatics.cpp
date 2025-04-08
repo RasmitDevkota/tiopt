@@ -15,8 +15,10 @@ void electrostatic(char* meshfile, char* outputfile) {
 	formulation elec;                  // Electrostatics with 0 charge density
 	elec += integral(vol, -8.854e-12 * grad(dof(v)) * grad(tf(v)));
 
-	elec.solve();                      // Generate, solve and save solution to field v
+	elec.generate();                      // Generate, solve and save solution to field v
+	vec solV = solve(elec.A(), elec.b());
+	v.setdata(vol, solV);
 
-	(-grad(v)).write(vol, outputfile, 2); // Write the electric field to ParaView format
+	v.write(vol, outputfile, 2); // Write the electric field to ParaView format
 }
 }
