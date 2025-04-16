@@ -1,28 +1,15 @@
+#include "main.h"
+
 #include <stdlib.h>
 #include <stdio.h>
 
-#include <sparselizard.h>
+// #include <sparselizard.h>
 #include <nlopt.h>
 
-#include "sph.h"
-
-struct Electrode
-{
-  const int n_vertices; // stores a list of the relative coordinates of all the vertices
-  const int n_edges; // stores a list of indices of vertices connected by edges, labelled by index
-  double (*vertices)[][3]; // stores a list of the relative coordinates of all the vertices; implicity, length n_vertices
-  int (*edges)[][2]; // stores a list of indices of vertices (labelled by index) connected by edges; implicity, length n_edges
-  const int V_len;
-  double (*V)[]; // potential energy per volt in spherical harmonics expansion; implicity, length V_len
-  mesh *electrode_mesh;
-};
-
-struct Trap
-{
-  int n_electrodes; // non-constant in case we want to add electrodes to a Trap
-  struct Electrode (*electrodes)[]; // implicitly, length n_electrodes
-  mesh *trap_mesh;
-};
+#include "data_structures.h"
+#include "trap_geometry.h"
+// #include "electrostatics.h"
+// #include "sph.h"
 
 // cost function passed to optimization routine
 double cost_function(
@@ -35,7 +22,7 @@ double cost_function(
   double cost = 0;
 
   // being lazy with memory for now just as a sketch
-  struct Trap trap = {};
+  struct Trap trap;
 
   // generate trap from input parameter array
   generate_trap_from_parameters(&trap, x);
@@ -44,17 +31,17 @@ double cost_function(
   generate_mesh(&trap);
 
   // solve for the potential energy as a 3D array of data for each electrode individually
-  solve_electrostatics(&trap);
+  // solve_trap_electrostatics(&trap);
 
   // compute the spherical harmonics expansion of the potential energy contribution of every electrode and save in V
   // this can be optimized if we have a saved electrode library that we can recall from if an electrode matches an existing one, just being lazy for now as a sketch
-  expand_spherical_harmonics(&trap);
+  // expand_spherical_harmonics(trap.V_len, trap.V);
 
   // perform ion transport experiments now! we don't know how we will actually structure this part, just an example
   for (int e = 0; e < 5; e++)
   {
-    cost_experiment_e = perform_experiment(&trap, e);
-    cost += cost_experiment_e;
+    // cost_experiment_e = perform_experiment(&trap, e);
+    // cost += cost_experiment_e;
   }
 
   return cost;
@@ -63,8 +50,15 @@ double cost_function(
 // main optimization loop
 int main()
 {
-  double min_cost;
-  const int dim;
+  cost_function(
+    0,
+    NULL,
+    NULL,
+    NULL
+  );
+
+  double min_cost = 99999;
+  const int dim = 1;
 
   // nlopt setup
   nlopt_opt opt = nlopt_create(NLOPT_LN_COBYLA, dim);
@@ -72,13 +66,17 @@ int main()
   // @TODO - constraints
 
   // @TODO - bounds
-  
+
   // @TODO - tolerances
 
   nlopt_set_min_objective(opt, cost_function, NULL);
 
   // @TODO - initial guess
-  double *x;
+  double *x = {};
+  for (int i = 0; i < dim; i++)
+  {
+    x[i] = 0;
+  }
 
   if (nlopt_optimize(opt, x, &min_cost) < 0)
   {
@@ -101,3 +99,4 @@ int main()
 
   return 0;
 }
+

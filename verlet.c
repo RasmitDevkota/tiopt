@@ -27,6 +27,8 @@ void velocity_verlet(
 		printf("Position at step %d, time %f: (%f,%f,%f)\n", t, (double)(t+1) * dt, (*pos)[0], (*pos)[1], (*pos)[2]);
 	}
 
+	free(grad_V);
+
 	printf("Finished!\n");
 }
 
@@ -63,7 +65,6 @@ void velocity_verlet_update(
 		*(acc)[k] = (*new_acc)[k];
 	}
 
-	free(grad_V);
 	free(new_acc);
 }
 
