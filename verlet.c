@@ -17,7 +17,7 @@ void velocity_verlet(
 ) {
 	// @TODO - consider passing grad_V around instead
 	// compute grad_V
-	double (*grad_V)[] = malloc(sizeof V);
+	double (*grad_V)[3] = malloc(sizeof(V));
 	grad(V_len, V, grad_V, dt); // @TODO - choose a better value for dx than dt
 
 	for (int t = 0; t < n_it; t++)
@@ -50,21 +50,21 @@ void velocity_verlet_update(
 
 	// we have to keep the old and new accelerations separate for later use
 	// in updating the velocity
-	double (*new_acc)[3] = malloc((size_t) 3 * sizeof(double));
-	for (int k = 0; k < 3; k++)
-	{
-		(*new_acc)[k] = -q * (*grad_V)[k]/m;
-	}
-
-	for (int k = 0; k < 3; k++)
-	{
-		*(vel)[k] += ((*acc)[k]+(*new_acc)[k]) * (dt * 0.5);
-		
-		// we don't need to track the old acceleration after we use it here,
-		// so update the primary acceleration array
-		*(acc)[k] = (*new_acc)[k];
-	}
-
-	free(new_acc);
+	// double (*new_acc)[3] = malloc((size_t) 3 * sizeof(double));
+	// for (int k = 0; k < 3; k++)
+	// {
+	// 	(*new_acc)[k] = -q * (*grad_V)[k]/m;
+	// }
+	//
+	// for (int k = 0; k < 3; k++)
+	// {
+	// 	*(vel)[k] += ((*acc)[k]+(*new_acc)[k]) * (dt * 0.5);
+	// 	
+	// 	// we don't need to track the old acceleration after we use it here,
+	// 	// so update the primary acceleration array
+	// 	*(acc)[k] = (*new_acc)[k];
+	// }
+	//
+	// free(new_acc);
 }
 
