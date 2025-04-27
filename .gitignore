@@ -1,4 +1,9 @@
-# Output files
+# tiopt output files
 *.o
 tiopt
+
+# GMSH output files
 meshes/
+
+# Sparselizard output files
+.pos
