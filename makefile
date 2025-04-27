@@ -16,11 +16,14 @@ GMSH_LIBS = -L$(GMSH_LIB_DIR) -lgmsh
 NLOPT_LIBS = -L$(NLOPT_LIB_DIR) -lnlopt
 SPARSELIZARD_LIBS = -L$(SPARSELIZARD_LIB_DIR) -lsparselizard -lopenblas -L$(SLEPC_DIR)/$(SLEPC_ARCH)/lib -lslepc -L$(PETSC_DIR)/$(PETSC_ARCH)/lib -lpetsc
 
-GMSH_INCLUDES = -I$(GMSH_INCLUDE_DIR)
+# GMSH_INCLUDES = -I$(GMSH_INCLUDE_DIR) # dependency errors flood output
+GMSH_INCLUDES = -isystem $(GMSH_INCLUDE_DIR)
 
-SPARSELIZARD_INCLUDES = -I$(SPARSELIZARD_INCLUDE_DIR)
+# SPARSELIZARD_INCLUDES = -I$(SPARSELIZARD_INCLUDE_DIR) # dependency errors flood output
+SPARSELIZARD_INCLUDES = -isystem $(SPARSELIZARD_INCLUDE_DIR)
 SPARSELIZARD_INCLUDES += $(shell find $(SPARSELIZARD_INCLUDE_DIR) -type d -exec echo -I{} \;)
-SPARSELIZARD_INCLUDES += -I$(SLEPC_DIR)/$(SLEPC_ARCH)/include -I$(SLEPC_DIR)/include -I$(PETSC_DIR)/$(PETSC_ARCH)/include -I$(PETSC_DIR)/include
+# SPARSELIZARD_INCLUDES += -I$(SLEPC_DIR)/$(SLEPC_ARCH)/include -I$(SLEPC_DIR)/include -I$(PETSC_DIR)/$(PETSC_ARCH)/include -I$(PETSC_DIR)/include # dependency errors flood output
+SPARSELIZARD_INCLUDES += -isystem $(SLEPC_DIR)/$(SLEPC_ARCH)/include -isystem $(SLEPC_DIR)/include -isystem $(PETSC_DIR)/$(PETSC_ARCH)/include -isystem $(PETSC_DIR)/include
 
 # Compiler and flags
 FC = gfortran
@@ -58,7 +61,7 @@ $(C_OBJ): $(C_SRC)
 
 # Compile C++ code
 $(CXX_OBJ): $(CXX_SRC)
-	$(CXX) -c $(CXX_SRC) $(CXXFLAGS) -libstdc++ $(GMSH_INCLUDES) $(GMSH_LIBS) $(SPARSELIZARD_INCLUDES) $(SPARSELIZARD_LIBS) -o $(CXX_OBJ)
+	$(CXX) -c $(CXX_SRC) $(CXXFLAGS) $(GMSH_INCLUDES) $(GMSH_LIBS) $(SPARSELIZARD_INCLUDES) $(SPARSELIZARD_LIBS) -o $(CXX_OBJ)
 
 # Clean up build files
 clean:
