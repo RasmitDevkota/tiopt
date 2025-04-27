@@ -14,7 +14,7 @@ extern "C"
 	// %TODO - find a way to directly recover the electric potential and electric field data
 	void sparselizard_wrapper(char *mesh_filename, char *output_filename)
 	{
-		// Trapping region volume and electrode electrode_surfaceface as set in mesh file
+		// Trapping region volume and electrode surface as set in mesh file
 		int sim_volume = 1;
 		int electrode_surface = 1;
 		mesh electrode_mesh(mesh_filename);
@@ -23,7 +23,7 @@ extern "C"
 		field V("h1");
 		// Interpolation order 2 on the whole domain
 		V.setorder(sim_volume, 2);
-		// Force 1 V on the electrode electrode_surfaceface
+		// Force 1 V on the electrode surface
 		V.setconstraint(electrode_surface, 1);
 
 		// Electrostatics with 0 charge density
@@ -34,8 +34,6 @@ extern "C"
 		elec.generate();
 		vec V_solution = solve(elec.A(), elec.b());
 		V.setdata(sim_volume, V_solution);
-
-		printf("Solved electrostatics!\n", mesh_filename);
 
 		sparselizard_sample_dh1(&V, sim_volume, 40, 40);
 		// sparselizard_sample_dh1(&V_solution, sim_volume, 40, 40);
@@ -56,9 +54,10 @@ extern "C"
 
 			for (int j = 0; j < nlon; j++) {
 				double theta = j/nlon * PI;
-				auto vector = f->interpolate(sample_volume, { sin_phi * cos(theta), sin_phi * sin(theta), cos_phi });
-				auto size = vector.size();
-				std::cout << size << std::endl;
+
+				// @TODO - determine how to get the info from this vector (since V is actually a scalar field)
+				std::vector<double> vector = f->interpolate(sample_volume, { sin_phi * cos(theta), sin_phi * sin(theta), cos_phi });
+				std::cout << vector.size() << std::endl; // diagnostic output
 				grid[i][j] = vector[0];
 			}
 		}
