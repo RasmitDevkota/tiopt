@@ -6,4 +6,4 @@ tiopt
 meshes/
 
 # Sparselizard output files
-.pos
+*.pos
