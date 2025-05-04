@@ -30,17 +30,17 @@ FC = gfortran
 CC = gcc
 CXX = g++
 
-CFLAGS = -O2 -Wall -fPIC
-CXXFLAGS = -Wall
+CFLAGS = -O1 -Wall -fPIC -g
+CXXFLAGS = -O1 -Wall -fPIC -g
 
 # Source files (C)
-C_SRC = data_structures.c ti_utils.c verlet.c sph.c electrostatics.c trap_geometry.c io.c main.c
+C_SRC = ti_utils.c verlet.c sph.c electrostatics.c trap_geometry.c io.c main.c
 
 # Source files (C++)
 CXX_SRC = fem_wrapper.cpp
 
 # Object files
-C_OBJ = data_structures.o ti_utils.o verlet.o sph.o electrostatics.o trap_geometry.o io.o main.o
+C_OBJ = ti_utils.o verlet.o sph.o electrostatics.o trap_geometry.o io.o main.o
 
 # Object files (C++)
 CXX_OBJ = fem_wrapper.o
@@ -66,6 +66,11 @@ $(CXX_OBJ): $(CXX_SRC)
 # Clean up build files
 clean:
 	rm -f $(CXX_OBJ) $(C_OBJ) $(OUTPUT)
+
+# Deep clean build files and outputs
+deep-clean:
+	rm -f $(CXX_OBJ) $(C_OBJ) $(OUTPUT)
+	rm meshes/*
 
 # Phony targets
 .PHONY: all clean
