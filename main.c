@@ -6,11 +6,11 @@
 
 #include <nlopt.h>
 
+#include "defs.h"
 #include "io.h"
 #include "data_structures.h"
 #include "trap_geometry.h"
-#include "electrostatics.h"
-// #include "sph.h"
+#include "electrostatics_wrapper.h"
 #include "verlet.h"
 
 // cost function passed to optimization routine
@@ -34,10 +34,6 @@ double cost_function(
     // solve for the potential energy as a 3D array of data for each electrode individually
     solve_trap_electrostatics(trap);
 
-    // compute the spherical harmonics expansion of the potential energy contribution of every electrode and save in V
-    // this can be optimized if we have a saved electrode library that we can recall from if an electrode matches an existing one, just being lazy for now as a sketch
-    // expand_spherical_harmonics(trap->V_len, trap->V);
-
     // perform ion transport experiments now! we don't know how we will actually structure this part, just an example
     for (int e = 0; e < 5; e++)
     {
@@ -53,43 +49,54 @@ double cost_function(
 // main optimization loop
 int main()
 {
-    // double (*pos)[3] = malloc((size_t) 3 * sizeof(double));
-    // double (*vel)[3] = malloc((size_t) 3 * sizeof(double));
-    // double (*acc)[3] = malloc((size_t) 3 * sizeof(double));
-    // for (int k = 0; k < 3; k++)
-    // {
-    //   (*pos)[k] = 0.0;
-    //   (*vel)[k] = 0.0;
-    //   (*acc)[k] = k == 0 ? -1.0 * pow((k-1),2)/1.0 : 0.0;
-    // }
-    // velocity_verlet(
-    //   1.0,
-    //   1.0,
-    //   10,
-    //   NULL,
-    //   pos,
-    //   vel,
-    //   acc,
-    //   10,
-    //   1.0
-    // );
-    // free(pos);
-    // free(vel);
-    // free(acc);
+    printf(
+        "|=---------------------------------------------------------------------------------------------------|\n"
+        "|                                                                                                    |\n"
+        "|                                   ████████╗██╗ ██████╗ ██████╗ ████████╗                           |\n"
+        "|                                   ╚══██╔══╝██║██╔═══██╗██╔══██╗╚══██╔══╝                           |\n"
+        "|                                      ██║   ██║██║   ██║██████╔╝   ██║                              |\n"
+        "|                                      ██║   ██║██║   ██║██╔═══╝    ██║                              |\n"
+        "|                                      ██║   ██║╚██████╔╝██║        ██║                              |\n"
+        "|                                      ╚═╝   ╚═╝ ╚═════╝ ╚═╝        ╚═╝                              |\n"
+        "|                                                                                                    |\n"
+        "|                                                                                                    |\n"
+        "|                                                                                                    |\n"
+        "|                                                 XXXXXXX                                            |\n"
+        "|                                               XX       XX                                          |\n"
+        "|                                              X           X             \\                           |\n"
+        "|                                             XX           XX   ==========》                         |\n"
+        "|                                              X           X             /                           |\n"
+        "|                                               XX       XX                                          |\n"
+        "|                                                 XXXXXXX                                            |\n"
+        "|                                                                                                    |\n"
+        "|                                                                                                    |\n"
+        "|                                 ########################################################           |\n"
+        "|                                ##+++++++##+++++++##+++++++##+++++++##+++++++##+++++++###           |\n"
+        "|                              ##+++++++##+++++++##+++++++##+++++++##+++++++##+++++++##.##           |\n"
+        "|                            ##+++++++##+++++++##+++++++##+++++++##+++++++##+++++++##...##           |\n"
+        "|                          ##+++++++##+++++++##+++++++##+++++++##+++++++##+++++++##.....##           |\n"
+        "|                        #########################################################......##           |\n"
+        "|                      #########################################################......##             |\n"
+        "|                    #########################################################......##               |\n"
+        "|                  #########################################################......##                 |\n"
+        "|                ##+++++++##+++++++##+++++++##+++++++##+++++++##+++++++##.......##                   |\n"
+        "|              ##+++++++##+++++++##+++++++##+++++++##+++++++##+++++++##.......##                     |\n"
+        "|            ##+++++++##+++++++##+++++++##+++++++##+++++++##+++++++##.......##                       |\n"
+        "|          ########################################################.......##                         |\n"
+        "|          ##....................................................##.....##                           |\n"
+        "|          ##....................................................##...##                             |\n"
+        "|          ##....................................................##.##                               |\n"
+        "|          #########################################################                                 |\n"
+        "|                                                                                                    |\n"
+        "|----------------------------------------------------------------------------------------------------|\n"
+    );
 
-    // cost_function(
-    //   0,
-    //   NULL,
-    //   NULL,
-    //   NULL
-    // );
 
     double min_cost = 99999;
     const int dim = 12;
 
-    printf("- Constructing optimization problem...\n");
-
     // nlopt setup
+    printf("- Constructing optimization problem...\n");
     nlopt_opt opt = nlopt_create(NLOPT_LN_COBYLA, dim);
 
     printf("Setting constraints...\n");
@@ -101,8 +108,8 @@ int main()
     printf("Setting tolerances...\n");
     // @TODO - tolerances
 
-    printf("Constructing initial guess...\n");
     // generate initial guess trap from file
+    printf("Constructing initial guess...\n");
     char *trap_filename = "trap.data";
     struct Trap trap;
     generate_trap_from_file(trap_filename, &trap);
@@ -143,7 +150,10 @@ int main()
     {
         free((*trap.electrodes)[e].vertices);
         free((*trap.electrodes)[e].edges);
+        free((*trap.electrodes)[e].Vlm);
     }
+
+    free(trap.electrodes);
 
     return 0;
 }

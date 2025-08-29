@@ -1,3 +1,6 @@
+# tiopt input files
+trap.data
+
 # tiopt output files
 *.o
 tiopt

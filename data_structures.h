@@ -6,9 +6,9 @@ struct Electrode
   int n_edges; // stores a list of indices of vertices connected by edges, labelled by index
   double (*vertices)[3]; // stores a list of the relative coordinates of all the vertices; implicity, length n_vertices-by-3
   int (*edges)[2]; // stores a list of indices of vertices (labelled by index) connected by edges; implicity, length n_edges-by-2
-  int V_len;
-  double (*V)[]; // potential energy per volt in spherical harmonics expansion; implicity, length V_len
-  char electrode_mesh_filename[64];
+  int Vlm_len; // must equal (LMAX+1)*(LMAX+1)*2
+  double (*Vlm)[]; // potential energy per volt in spherical harmonics expansion; implicity, length V_len
+  char electrode_mesh_filename[64]; // stores the location of the electrode mesh
 };
 
 struct Trap

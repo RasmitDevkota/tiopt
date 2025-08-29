@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "defs.h"
 #include "data_structures.h"
 
 // @TODO - currently not at the standard level of safety for an input parser,
@@ -29,7 +30,7 @@ int generate_trap_from_file(
 		char target[9+1];
 		sscanf(line, "%s.*", target);
 
-		if (strncmp("#", target, 1) == 0 || target[0] == "\0")
+		if (strncmp("#", target, 1) == 0 || target[0] == '\0')
 		{
 			continue;
 		}
@@ -46,8 +47,16 @@ int generate_trap_from_file(
 			{
 				sscanf(line, "trap n_electrodes %d.*", &(trap->n_electrodes));
 
+				// Since we know the number of electrodes now, we perform the common memory allocations
 				trap->electrode_positions = malloc(trap->n_electrodes * sizeof(double[3]));
+
 				trap->electrodes = malloc(trap->n_electrodes * sizeof(struct Electrode));
+
+				for (int electrode_num = 0; electrode_num < trap->n_electrodes; electrode_num++)
+				{
+					(*trap->electrodes)[electrode_num].Vlm_len = (LMAX+1)*(LMAX+1)*2;
+					(*trap->electrodes)[electrode_num].Vlm = malloc((*trap->electrodes)[electrode_num].Vlm_len * sizeof(double));
+				}
 			}
 			else if (strcmp(parameter, "n_electrodes_rf") == 0)
 			{
