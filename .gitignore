@@ -6,4 +6,7 @@ tiopt
 meshes/
 
 # Sparselizard output files
+sl_outputs/
+*.vtk
+*.vtu
 *.pos
