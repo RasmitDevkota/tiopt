@@ -13,3 +13,24 @@ void interpolate_1d(
 	const double dx
 );
 
+void interpolate_3d(
+	const int f_len_x,
+	const int f_len_y,
+	const int f_len_z,
+	double (*f)[f_len_x][f_len_y][f_len_z],
+	double p_rel[3],
+	double *f_p_rel,
+	double dx,
+	double dy,
+	double dz
+);
+
+int point_in_polygon_zslice(
+	int x,
+	int y,
+	int z,
+	int n_vertices,
+	double (*vertices)[3],
+	int check_bounding_box
+);
+

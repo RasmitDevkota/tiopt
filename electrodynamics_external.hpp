@@ -1,7 +1,3 @@
-#include <stdio.h>
-
-// #include <sparselizard.h>
-
 #include "defs.h"
 
 #ifdef __cplusplus
@@ -24,7 +20,7 @@ void sparselizard_sample_dh1(
     double grid[NLAT][NLON]
 );
 
-void expand_spherical_harmonics(
+void expand_spherical_harmonics_cpp(
     double grid[NLAT][NLON],
     double (*alm)[(LMAX+1)*(LMAX+1)*2]
 );

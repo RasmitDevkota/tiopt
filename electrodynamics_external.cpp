@@ -1,4 +1,4 @@
-#include "electrostatics.h"
+#include "electrodynamics_external.hpp"
 
 #include <stdio.h>
 #include <math.h>
@@ -18,19 +18,20 @@ extern "C"
 		int sim_volume = 5;
 
 		// Option 1: Load existing mesh from file
-		// mesh electrode_mesh(mesh_filename);
+		mesh electrode_mesh(mesh_filename);
 
-		// Option 2: Construct new mesh using Sparselizard library
-		shape shape_electrode_surface("quadrangle", electrode_surface, {-10,-10,0, 10,-10,0, 10,10,0, -10,10,0}, {10,10,10,10});
-		shape shape_electrode_volume = shape_electrode_surface.extrude(electrode_volume, 10.0, 2);
+		// // Option 2: Construct new mesh using Sparselizard library
+		// shape shape_electrode_surface("quadrangle", electrode_surface, {-10,-10,0, 10,-10,0, 10,10,0, -10,10,0}, {10,10,10,10});
+		// shape shape_electrode_volume = shape_electrode_surface.extrude(electrode_volume, 10.0, 2);
+		//
+		// int sim_surface = 6;
+		// double z = 5.0;
+		// shape shape_sim_surface("quadrangle", sim_surface, {-50,-50,z, 50,-50,z, 50,50,z, -50,50,z}, {50,50,50,50});
+		// shape shape_sim_volume = shape_sim_surface.extrude(sim_volume, 50.0, 10);
+		//
+		// mesh electrode_mesh({ shape_electrode_volume, shape_sim_volume });
 
-		int sim_surface = 6;
-		double z = 5.0;
-		shape shape_sim_surface("quadrangle", sim_surface, {-50,-50,z, 50,-50,z, 50,50,z, -50,50,z}, {50,50,50,50});
-		shape shape_sim_volume = shape_sim_surface.extrude(sim_volume, 50.0, 10);
-
-		mesh electrode_mesh({ shape_electrode_volume, shape_sim_volume });
-
+		// Option 2b:
 		// shape shape_electrode_surface("quadrangle", electrode_surface, {-10,-10,0, 10,-10,0, 10,10,0, -10,10,0}, {10,10,10,10});
 		// shape shape_sim_volume = shape_electrode_surface.extrude(sim_volume, 50.0, 50);
 		//
@@ -48,26 +49,30 @@ extern "C"
 		printf("Constructing problem...\n");
 
 		// Nodal shape functions for the electric potential
-		field V("h1");
+		field V("h1", {1});
+		field V_lin = V.harmonic(1);
 
 		// Interpolation order 2 on the whole domain
-		V.setorder(sim_volume, 2);
-	
-		// // Force 1 V on the electrode surface
-		// V.setconstraint(electrode_surface, 1);
-	
+		V.setorder(sim_volume, 1);
+
 		// Force 1 V on the electrode volume
-		V.setconstraint(electrode_volume, 2);
+		V.setconstraint(electrode_volume, 1);
 
-		// // Force 1 V on the simulation volume
-		// V.setconstraint(sim_volume, 9);
+		// Define the speed of light [m/s] and the fundamental frequency [Hz].
+		// The effective length of an electrode is on the order of 10-100 um. This corresponds to around a fundamental frequency on the order of THz:
+		double c = 3E8, f_0 = 1E12;
+		setfundamentalfrequency(f_0);
 
-		// Formulate electrostatics problem with 0 charge density
 		formulation elec;
-		elec += sl::integral(sim_volume, -55.26349406 * sl::grad(sl::dof(V)) * sl::grad(sl::tf(V)));
+
+		// Option 1: Formulate electrostatics problem with 0 charge density
+		// elec += sl::integral(sim_volume, -55.26349406 * sl::grad(sl::dof(V)) * sl::grad(sl::tf(V)));
+		// Option 2: Formulate electrodynamics problem (Lorenz gauge) with 0 charge density
+		elec += integral(sim_volume, -grad(dof(V))*grad(tf(V)) - 1/(c*c)*dtdt(dof(V))*tf(V));
+
 		elec.generate();
 
-		printf("Solving electrostatics problem...\n");
+		printf("Solving electrodynamics problem...\n");
 
 		// Solve and save solution to field V
 		vec V_solution = sl::solve(elec.A(), elec.b());
@@ -75,11 +80,10 @@ extern "C"
 
 		printf("Writing electric potential to ParaView format...\n");
 
-		// Write the electric potential to ParaView format
-		V_solution.write("sl_outputs/V_solution_data.txt");
-		V.write(sim_volume, output_filename, 2);
-		V.write(sim_volume, "V.pos", 2);
-		V.write(sim_volume, "V.vtk", 2);
+		// Option 1: Write the static electric potential to GMSH post-processing format
+		// V.write(sim_volume, "sl_outputs/V.pos", 2);
+		// Option 2: Write one timestep of the electric potential time series to GMSH post-processing format
+		V.write(sim_volume, "sl_outputs/V.pos", 2, 1);
 
 		printf("Sampling field...\n");
 
@@ -90,7 +94,7 @@ extern "C"
 		printf("Expanding in spherical harmonics basis...\n");
 
 		// compute the spherical harmonics expansion of the potential energy contribution
-		expand_spherical_harmonics(grid, Vlm);
+		expand_spherical_harmonics_cpp(grid, Vlm);
 	}
 
 	void sparselizard_sample_dh1(
@@ -140,7 +144,7 @@ extern "C"
 		}
 	}
 
-	void expand_spherical_harmonics(
+	void expand_spherical_harmonics_cpp(
 		double grid[NLAT][NLON],
 		double (*alm)[(LMAX+1)*(LMAX+1)*2]
 	) {

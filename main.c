@@ -7,10 +7,10 @@
 #include <nlopt.h>
 
 #include "defs.h"
-#include "io.h"
 #include "data_structures.h"
+#include "io.h"
 #include "trap_geometry.h"
-#include "electrostatics_wrapper.h"
+#include "electrodynamics.h"
 #include "verlet.h"
 
 // cost function passed to optimization routine
@@ -21,7 +21,7 @@ double cost_function(
     void *trap_obj
 ) {
     // the purpose of this function is to compute an aggregate cost of a trap design and transport configuration
-    double cost = 0;
+    double cost = 0.0;
 
     // being lazy with memory for now just as a sketch
     struct Trap *trap = (struct Trap *)trap_obj;
@@ -32,7 +32,7 @@ double cost_function(
     generate_mesh(trap);
 
     // solve for the potential energy as a 3D array of data for each electrode individually
-    solve_trap_electrostatics(trap);
+    solve_trap_electrodynamics(trap, RELAXATION);
 
     // perform ion transport experiments now! we don't know how we will actually structure this part, just an example
     for (int e = 0; e < 5; e++)

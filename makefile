@@ -34,16 +34,16 @@ CFLAGS = -O1 -Wall -fPIC -g
 CXXFLAGS = -O1 -Wall -fPIC -g
 
 # Source files (C)
-C_SRC = ti_utils.c verlet.c electrostatics_wrapper.c trap_geometry.c io.c main.c
+C_SRC = ti_utils.c verlet.c electrodynamics.c trap_geometry.c io.c main.c
 
 # Source files (C++)
-CXX_SRC = electrostatics.cpp
+CXX_SRC = electrodynamics_external.cpp
 
 # Object files
-C_OBJ = ti_utils.o verlet.o electrostatics_wrapper.o trap_geometry.o io.o main.o
+C_OBJ = ti_utils.o verlet.o electrodynamics.o trap_geometry.o io.o main.o
 
 # Object files (C++)
-CXX_OBJ = electrostatics.o
+CXX_OBJ = electrodynamics_external.o
 
 # Output binary
 OUTPUT = tiopt
