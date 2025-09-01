@@ -68,12 +68,12 @@ void interpolate_3d(
 	double z = p_rel[2] * dz;
 
 	if (
-		(x < 1 || x > f_len_x-1) ||
-		(y < 1 || y > f_len_y-1) ||
-		(z < 1 || z > f_len_z-1)
+		(x < 0 || x > f_len_x-1) ||
+		(y < 0 || y > f_len_y-1) ||
+		(z < 0 || z > f_len_z-1)
 	)
 	{
-		printf("Cannot interpolate value of function at point (%f,%f,%f) - too close to edge of function.\n", x, y, z);
+		printf("Cannot interpolate value of function at point index (%.13f,%.13f,%.13f) - too close to edge of function at (%d,%d,%d).\n", x, y, z, f_len_x, f_len_y, f_len_z);
 		return;
 	}
 
