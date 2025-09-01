@@ -52,14 +52,10 @@ void solver_relaxation(
 	for (int x = 0; x < RELAXATION_NX; x++)
 		for (int y = 0; y < RELAXATION_NY; y++)
 			for (int z = 0; z < RELAXATION_NZ; z++)
-			{
 				if (
 					point_in_polygon_zslice(x - RELAXATION_NX/2, y - RELAXATION_NY/2, z, electrode->n_vertices, electrode->vertices, 0)
 				)
-				{
 					(*V)[x][y][z] = 1.0;
-				}
-			}
 
 	// Poisson equation-tuned constant vs. Chebyshev-accelerated estimate for omega
 	double rho = 1.0;
@@ -91,12 +87,12 @@ void solver_relaxation(
 								(*V)[x - dx][y][z] + (*V)[x + dx][y][z] +
 								(*V)[x][y - dy][z] + (*V)[x][y + dy][z] +
 								(*V)[x][y][z - dz] + (*V)[x][y][z + dz]
-							) - 9 * (*V)[x][y][z];
+							) - 6 * (*V)[x][y][z];
 
 							if (fabs(xi) > fabs(xi_it_max))
 								xi_it_max = xi;
 
-							(*V)[x][y][z] += 1.0/9.0 * omega * xi;
+							(*V)[x][y][z] += 1.0/6.0 * omega * xi;
 						}
 					}
 
@@ -117,25 +113,33 @@ void solver_relaxation(
 		xi_it_max_prev = xi_it_max;
 	}
 
-	// @TODO - perform the next two steps for multiple spheres
+	printf("Sampling grid and expanding potential in spherical harmonics basis...\n");
+	for (int sx = 0; sx < NSPH_X; sx++)
+		for (int sy = 0; sy < NSPH_Y; sy++)
+			for (int sz = 0; sz < NSPH_Z; sz++)
+			{
+				printf("Sphere index: (%d, %d, %d)\n", sx, sy, sz);
 
-	printf("Sampling field...\n");
+				double x_c = sx * SPH_SPACING + SPH_R;
+				double y_c = sy * SPH_SPACING + SPH_R;
+				double z_c = sz * SPH_SPACING + SPH_Z_MIN + 1;
+				printf("Sphere center: (%f, %f, %f)\n", x_c, y_c, z_c);
 
-	// Sample field based on method by Driscoll and Healy (1994)
-	double grid[NLAT][NLON];
-	sample_dh1(
-		RELAXATION_NX, RELAXATION_NY, RELAXATION_NZ,
-		V,
-		grid,
-		dx, dy, dz
-	);
+				// Sample grid based on method by Driscoll and Healy (1994)
+				double grid[NLAT][NLON];
+				sample_dh1(
+					RELAXATION_NX, RELAXATION_NY, RELAXATION_NZ,
+					V,
+					x_c, y_c, z_c,
+					grid,
+					dx, dy, dz
+				);
+
+				// Compute the spherical harmonics expansion of the potential energy contribution
+				expand_spherical_harmonics(grid, electrode->Vlm);
+			}
 
 	free(V);
-
-	printf("Expanding potential in spherical harmonics basis...\n");
-
-	// Compute the spherical harmonics expansion of the potential energy contribution
-	expand_spherical_harmonics(grid, electrode->Vlm);
 }
 
 // @TODO - generalize syntax and move to ti_utils.c for generality
@@ -144,13 +148,14 @@ void sample_dh1(
 	const int NY,
 	const int NZ,
 	double (*V)[NX][NY][NZ],
+	double x_c,
+	double y_c,
+	double z_c,
 	double grid[NLAT][NLON],
 	double dx,
 	double dy,
 	double dz
 ) {
-	double sphere_center_offset[3] = { (double)NX/2, (double)NY/2, SPH_Z_MIN };
-
 	for (int i = 0; i < NLAT; i++) {
 		double phi = (double)i/NLAT * PI;
 
@@ -161,13 +166,7 @@ void sample_dh1(
 		for (int j = 0; j < NLON; j++) {
 			double theta = (double)j/NLON * PI;
 
-			// @TODO - offset the coordinate based on array indexing (I think by -Ni/2)
-			double sample_coord_rel[3] = { R_sin_phi * cos(theta), R_sin_phi * sin(theta), R_cos_phi };
-			double sample_coord[3] = { 0.0, 0.0, 0.0 };
-			for (int d = 0; d < 3; d++)
-			{
-				sample_coord[d] = sphere_center_offset[d] + sample_coord_rel[d];
-			}
+			double sample_coord[3] = { x_c + R_sin_phi * cos(theta), y_c + R_sin_phi * sin(theta), z_c + R_cos_phi };
 
 			interpolate_3d(
 				NX, NY, NZ,
@@ -176,7 +175,8 @@ void sample_dh1(
 				&grid[i][j],
 				dx, dy, dz
 			);
-			printf("V(%f,%f,%f)=%f\n", SPH_R, phi, theta, grid[i][j]);
+			if (fabs(grid[i][j]) > 1E-6)
+				printf("V(%f,%f,%f)=%.13f\n", SPH_R, phi, theta, grid[i][j]);
 		}
 	}
 }
