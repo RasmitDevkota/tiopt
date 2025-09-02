@@ -48,14 +48,15 @@ int generate_trap_from_file(
 				sscanf(line, "trap n_electrodes %d.*", &(trap->n_electrodes));
 
 				// Since we know the number of electrodes now, we perform the common memory allocations
-				trap->electrode_positions = malloc(trap->n_electrodes * sizeof(double[3]));
+				trap->electrode_positions = calloc(trap->n_electrodes, sizeof(double[3]));
 
 				trap->electrodes = malloc(trap->n_electrodes * sizeof(struct Electrode));
 
 				for (int electrode_num = 0; electrode_num < trap->n_electrodes; electrode_num++)
 				{
-					(*trap->electrodes)[electrode_num].Vlm_len = (LMAX+1)*(LMAX+1)*2;
-					(*trap->electrodes)[electrode_num].Vlm = malloc((*trap->electrodes)[electrode_num].Vlm_len * sizeof(double));
+					(*trap->electrodes)[electrode_num].Vlm_len = NSPH_X*NSPH_Y*NSPH_Z*((LMAX+1)*(LMAX+1)*2);
+
+					(*trap->electrodes)[electrode_num].Vlm = calloc(NSPH_X*NSPH_Y*NSPH_Z*(LMAX+1)*(LMAX+1)*2, sizeof(double));
 				}
 			}
 			else if (strcmp(parameter, "n_electrodes_rf") == 0)

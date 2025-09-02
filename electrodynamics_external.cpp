@@ -5,12 +5,14 @@
 
 #include <sparselizard.h>
 
+#include "defs.h"
+
 extern "C"
 {
 	void sparselizard_wrapper(
 		char *mesh_filename,
 		char *output_filename,
-		double (*Vlm)[(LMAX+1)*(LMAX+1)*2]
+		double (*Vlm)[NSPH_X*NSPH_Y*NSPH_Z*(LMAX+1)*(LMAX+1)*2]
 	) {
 		// Physical group tags as set in mesh file
 		int electrode_surface = 3;
@@ -85,6 +87,8 @@ extern "C"
 		// Option 2: Write one timestep of the electric potential time series to GMSH post-processing format
 		V.write(sim_volume, "sl_outputs/V.pos", 2, 1);
 
+		// @TODO - perform the below steps in a loop over all spheres
+
 		printf("Sampling field...\n");
 
 		// Sample field based on method by Driscoll and Healy (1994)
@@ -93,8 +97,8 @@ extern "C"
 
 		printf("Expanding in spherical harmonics basis...\n");
 
-		// compute the spherical harmonics expansion of the potential energy contribution
-		expand_spherical_harmonics_cpp(grid, Vlm);
+		// Compute the spherical harmonics expansion of the potential energy contribution
+		expand_spherical_harmonics_cpp(grid, VLM_SLICE(Vlm, 0, 0, 0));
 	}
 
 	void sparselizard_sample_dh1(
@@ -146,7 +150,7 @@ extern "C"
 
 	void expand_spherical_harmonics_cpp(
 		double grid[NLAT][NLON],
-		double (*alm)[(LMAX+1)*(LMAX+1)*2]
+		double *alm
 	) {
 		// Define new variables so that Fortran recognizes the types
 		int nlat = NLAT;
@@ -155,7 +159,7 @@ extern "C"
 
 		// Call the Fortran function
 		// compute_shcoeffs_cmplx((double*) grid, &nlat, &nlon, &lmax, *alm);
-		compute_shcoeffs_real((double*) grid, &nlat, &nlon, &lmax, *alm);
+		compute_shcoeffs_real((double*) grid, &nlat, &nlon, &lmax, alm);
 
 		// Print first few coefficients
 		for (int l = 0; l <= LMAX; l++) {
@@ -166,13 +170,15 @@ extern "C"
 				if (m < 0)
 				{
 					// Y_l,-m = (-1)^m Y_l,m*
-					alm_real = pow(-1, m) * (*alm)[2 * (l * (LMAX + 1) + m)];
-					alm_imag = pow(-1, m) * -1 * (*alm)[2 * (l * (LMAX + 1) + m) + 1];
+					// alm_real = pow(-1, m) * (*alm)[2 * (l * (LMAX + 1) + m)];
+					// alm_imag = pow(-1, m) * -1 * (*alm)[2 * (l * (LMAX + 1) + m) + 1];
+					alm_real = pow(-1, m) * alm[2 * (l * (LMAX + 1) + m)];
+					alm_imag = pow(-1, m) * -1 * alm[2 * (l * (LMAX + 1) + m) + 1];
 				}
 				else
 				{
-					alm_real = (*alm)[2 * (l * (LMAX + 1) + m)];
-					alm_imag = (*alm)[2 * (l * (LMAX + 1) + m) + 1];
+					alm_real = alm[2 * (l * (LMAX + 1) + m)];
+					alm_imag = alm[2 * (l * (LMAX + 1) + m) + 1];
 				}
 
 				printf("a_lm[%d,+%d] = (%f, %f)\n", l, m, alm_real, alm_imag);

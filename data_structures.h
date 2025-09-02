@@ -1,14 +1,16 @@
 #pragma once
 
+#include "defs.h"
+
 struct Electrode
 {
   int n_vertices; // stores a list of the relative coordinates of all the vertices
   int n_edges; // stores a list of indices of vertices connected by edges, labelled by index
   double (*vertices)[3]; // stores a list of the relative coordinates of all the vertices; implicity, length n_vertices-by-3
   int (*edges)[2]; // stores a list of indices of vertices (labelled by index) connected by edges; implicity, length n_edges-by-2
-  int Vlm_len; // must equal (LMAX+1)*(LMAX+1)*2
-  double (*Vlm)[]; // potential energy per volt in spherical harmonics expansion; implicity, length V_len
-  char electrode_mesh_filename[64]; // stores the location of the electrode mesh
+  int Vlm_len; // must equal NSPH_X*NSPH_Y*NSPH_Z*(LMAX+1)*(LMAX+1)*2
+  double (*Vlm)[]; // electric potential in spherical harmonics expansion; implicity, length V_len in each component
+  char electrode_mesh_filename[64]; // stores the path to the electrode mesh file
 };
 
 struct Trap

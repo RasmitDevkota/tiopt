@@ -39,6 +39,6 @@ extern void compute_shcoeffs_real(double *grid, int *nlat, int *nlon, int *lmax,
 
 void expand_spherical_harmonics(
 	double grid[NLAT][NLON],
-	double (*alm)[(LMAX+1)*(LMAX+1)*2]
+	double *alm
 );
 

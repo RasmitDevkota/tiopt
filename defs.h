@@ -70,3 +70,8 @@
 	_a < _b ? _a : _b; })
 #endif
 
+#ifndef VLM_SLICE
+#define VLM_SLICE(Vlm, sx, sy, sz) \
+    (&(*Vlm)[((sx) * NSPH_Y * NSPH_Z + (sy) * NSPH_Z + (sz)) * ((LMAX+1)*(LMAX+1)*2)])
+#endif
+

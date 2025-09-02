@@ -11,7 +11,7 @@ extern void compute_shcoeffs_real(double *grid, int *nlat, int *nlon, int *lmax,
 void sparselizard_wrapper(
     char *mesh_filename,
     char *output_filename,
-    double (*Vlm)[(LMAX+1)*(LMAX+1)*2]
+    double (*Vlm)[NSPH_X*NSPH_Y*NSPH_Z*(LMAX+1)*(LMAX+1)*2]
 );
 
 void sparselizard_sample_dh1(
@@ -22,7 +22,7 @@ void sparselizard_sample_dh1(
 
 void expand_spherical_harmonics_cpp(
     double grid[NLAT][NLON],
-    double (*alm)[(LMAX+1)*(LMAX+1)*2]
+    double *alm
 );
 
 #ifdef __cplusplus

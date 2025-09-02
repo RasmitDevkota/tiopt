@@ -118,12 +118,10 @@ void solver_relaxation(
 		for (int sy = 0; sy < NSPH_Y; sy++)
 			for (int sz = 0; sz < NSPH_Z; sz++)
 			{
-				printf("Sphere index: (%d, %d, %d)\n", sx, sy, sz);
-
 				double x_c = sx * SPH_SPACING + SPH_R;
 				double y_c = sy * SPH_SPACING + SPH_R;
 				double z_c = sz * SPH_SPACING + SPH_Z_MIN + 1;
-				printf("Sphere center: (%f, %f, %f)\n", x_c, y_c, z_c);
+				printf("Sphere at index (%d, %d, %d), position (%f, %f, %f)\n", sx, sy, sz, x_c, y_c, z_c);
 
 				// Sample grid based on method by Driscoll and Healy (1994)
 				double grid[NLAT][NLON];
@@ -136,7 +134,7 @@ void solver_relaxation(
 				);
 
 				// Compute the spherical harmonics expansion of the potential energy contribution
-				expand_spherical_harmonics(grid, electrode->Vlm);
+				expand_spherical_harmonics(grid, VLM_SLICE(electrode->Vlm, sx, sy, sz));
 			}
 
 	free(V);
@@ -175,8 +173,10 @@ void sample_dh1(
 				&grid[i][j],
 				dx, dy, dz
 			);
-			if (fabs(grid[i][j]) > 1E-6)
-				printf("V(%f,%f,%f)=%.13f\n", SPH_R, phi, theta, grid[i][j]);
+
+			// @TEST
+			// if (fabs(grid[i][j]) > 1E-6)
+			// 	printf("V(%f,%f,%f)=%.13f\n", SPH_R, phi, theta, grid[i][j]);
 		}
 	}
 }
@@ -184,7 +184,7 @@ void sample_dh1(
 // @TODO - generalize syntax and move to ti_utils.c for generality
 void expand_spherical_harmonics(
 	double grid[NLAT][NLON],
-	double (*alm)[(LMAX+1)*(LMAX+1)*2]
+	double *alm
 ) {
 	// Define new variables so that Fortran recognizes the types
 	int nlat = NLAT;
@@ -193,8 +193,8 @@ void expand_spherical_harmonics(
 
 	// Call the Fortran subroutine
 	// @TODO - get the complex subroutine working
-	// compute_shcoeffs_cmplx((double*) grid, &nlat, &nlon, &lmax, *alm);
-	compute_shcoeffs_real((double*) grid, &nlat, &nlon, &lmax, *alm);
+	// compute_shcoeffs_cmplx((double*) grid, &nlat, &nlon, &lmax, alm);
+	compute_shcoeffs_real((double*) grid, &nlat, &nlon, &lmax, alm);
 
 	// @TEST - Print first few coefficients
 	for (int l = 0; l <= LMAX; l++) {
@@ -205,16 +205,16 @@ void expand_spherical_harmonics(
 			if (m < 0)
 			{
 				// Y_l,-m = (-1)^m Y_l,m*
-				alm_real = pow(-1, m) * (*alm)[2 * (l * (LMAX + 1) + m)];
-				alm_imag = pow(-1, m) * -1 * (*alm)[2 * (l * (LMAX + 1) + m) + 1];
+				alm_real = pow(-1, m) * alm[2 * (l * (LMAX + 1) + m)];
+				alm_imag = pow(-1, m) * -1 * alm[2 * (l * (LMAX + 1) + m) + 1];
 			}
 			else
 			{
-				alm_real = (*alm)[2 * (l * (LMAX + 1) + m)];
-				alm_imag = (*alm)[2 * (l * (LMAX + 1) + m) + 1];
+				alm_real = alm[2 * (l * (LMAX + 1) + m)];
+				alm_imag = alm[2 * (l * (LMAX + 1) + m) + 1];
 			}
 
-			printf("a_lm[%d,+%d] = (%f, %f)\n", l, m, alm_real, alm_imag);
+			// printf("a_lm[%d,+%d] = (%f, %f)\n", l, m, alm_real, alm_imag);
 		}
 	}
 }
