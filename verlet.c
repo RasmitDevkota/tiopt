@@ -81,8 +81,8 @@ void velocity_verlet_update(
 							double dRl_dy = l * dy * pow(r, l-2);
 							for (int m = -l; m < 0; m++)
 							{
-								(*grad_V)[0] += (*Vlm_sphere)[2 * (l * (LMAX + 1) + m)] * dRl_dx * Ylm_thetaphi[l*(l+1)/2 + m];
-								(*grad_V)[1] += (*Vlm_sphere)[2 * (l * (LMAX + 1) + m)] * dRl_dy * Ylm_thetaphi[l*(l+1)/2 + m];
+								(*grad_V)[0] += (*Vlm_sphere)[2 * (l * (LMAX + 1) + abs(m))] * dRl_dx * Ylm_thetaphi[l*(l+1)/2 + m];
+								(*grad_V)[1] += (*Vlm_sphere)[2 * (l * (LMAX + 1) + abs(m))] * dRl_dy * Ylm_thetaphi[l*(l+1)/2 + m];
 								(*grad_V)[2] += 0.0;
 							}
 
@@ -91,19 +91,19 @@ void velocity_verlet_update(
 
 							for (int m = -l; m < 0; m++)
 							{
-								(*grad_V)[0] += pow(-1, m) * (*Vlm_sphere)[2 * (l * (LMAX + 1) + m)] * Rl * (
+								(*grad_V)[0] += pow(-1, m) * (*Vlm_sphere)[2 * (l * (LMAX + 1) + abs(m))] * Rl * (
 									m * (sin((abs(m)-1) * phi)) / (sin(abs(m) * phi))
 								) * Ylm_thetaphi[l*(l+1)/2 + m];
-								(*grad_V)[1] += pow(-1, m) * (*Vlm_sphere)[2 * (l * (LMAX + 1) + m)] * Rl * (
+								(*grad_V)[1] += pow(-1, m) * (*Vlm_sphere)[2 * (l * (LMAX + 1) + abs(m))] * Rl * (
 									m * (cos((abs(m)-1) * phi)) / (sin(abs(m) * phi))
 								) * Ylm_thetaphi[l*(l+1)/2 + m];
 							}
 							for (int m = 1; m <= l; m++)
 							{
-								(*grad_V)[0] += (*Vlm_sphere)[2 * (l * (LMAX + 1) + m)] * (
+								(*grad_V)[0] += (*Vlm_sphere)[2 * (l * (LMAX + 1) + abs(m))] * (
 									m * (cos((m-1) * phi)) / (cos(m * phi))
 								) * Ylm_thetaphi[l*(l+1)/2 + m];
-								(*grad_V)[1] += (*Vlm_sphere)[2 * (l * (LMAX + 1) + m)] * (
+								(*grad_V)[1] += (*Vlm_sphere)[2 * (l * (LMAX + 1) + abs(m))] * (
 									-1 * m * (sin((m-1) * phi)) / (cos(m * phi))
 								) * Ylm_thetaphi[l*(l+1)/2 + m];
 							}

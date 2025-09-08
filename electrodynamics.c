@@ -193,9 +193,9 @@ void expand_spherical_harmonics(
 
 			if (m < 0)
 			{
-				// Y_l,-m = (-1)^m Y_l,m*
-				alm_real = pow(-1, m) * alm[2 * (l * (LMAX + 1) + m)];
-				alm_imag = pow(-1, m) * -1 * alm[2 * (l * (LMAX + 1) + m) + 1];
+				// Y_l,-m = (-1)^m (Y_l,m)*
+				alm_real = pow(-1, m) * alm[2 * (l * (LMAX + 1) + abs(m))];
+				alm_imag = pow(-1, m) * -1 * alm[2 * (l * (LMAX + 1) + abs(m)) + 1];
 			}
 			else
 			{
