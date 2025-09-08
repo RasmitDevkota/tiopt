@@ -1,8 +1,9 @@
+#include "data_structures.h"
+
 void velocity_verlet(
+	struct Trap *trap,
 	const double m,
 	const double q,
-	const int V_len,
-	double (*V)[V_len],
 	double (*pos)[3],
 	double (*vel)[3],
 	double (*acc)[3],
@@ -11,11 +12,9 @@ void velocity_verlet(
 );
 
 void velocity_verlet_update(
+	struct Trap *trap,
 	const double m,
 	const double q,
-	const int V_len,
-	double (*V)[V_len],
-	double (*grad_V)[V_len],
 	double (*pos)[3],
 	double (*vel)[3],
 	double (*acc)[3],

@@ -1,0 +1,4 @@
+double heating_rate(
+
+);
+

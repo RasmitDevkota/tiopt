@@ -7,7 +7,6 @@
 #include "defs.h"
 #include "data_structures.h"
 #include "ti_utils.h"
-#include "electrodynamics_external.hpp"
 
 void solve_trap_electrodynamics(struct Trap *trap, enum ElectrodynamicsSolver electrodynamics_solver)
 {
@@ -20,17 +19,7 @@ void solve_trap_electrodynamics(struct Trap *trap, enum ElectrodynamicsSolver el
 
 		if (electrodynamics_solver == RELAXATION)
 		{
-			solver_relaxation(&electrode, (int) 1E4, 0);
-		}
-		else if (electrodynamics_solver == SPARSELIZARD)
-		{
-			char output_filename[64];
-			sprintf(
-				output_filename,
-				"sl_outputs/electrode_%d.vtk",
-				e
-			);
-			sparselizard_wrapper(electrode.electrode_mesh_filename, output_filename, electrode.Vlm);
+			solver_relaxation(&electrode, (int) 1E1, 0);
 		}
 	}
 }
@@ -120,7 +109,7 @@ void solver_relaxation(
 			{
 				double x_c = sx * SPH_SPACING + SPH_R;
 				double y_c = sy * SPH_SPACING + SPH_R;
-				double z_c = sz * SPH_SPACING + SPH_Z_MIN + 1;
+				double z_c = sz * SPH_SPACING + SPH_Z_MIN + 1; // # @TEST - check the +1
 				printf("Sphere at index (%d, %d, %d), position (%f, %f, %f)\n", sx, sy, sz, x_c, y_c, z_c);
 
 				// Sample grid based on method by Driscoll and Healy (1994)
@@ -174,7 +163,7 @@ void sample_dh1(
 				dx, dy, dz
 			);
 
-			// @TEST
+			// @TEST - print non-zero values
 			// if (fabs(grid[i][j]) > 1E-6)
 			// 	printf("V(%f,%f,%f)=%.13f\n", SPH_R, phi, theta, grid[i][j]);
 		}
@@ -196,7 +185,7 @@ void expand_spherical_harmonics(
 	// compute_shcoeffs_cmplx((double*) grid, &nlat, &nlon, &lmax, alm);
 	compute_shcoeffs_real((double*) grid, &nlat, &nlon, &lmax, alm);
 
-	// @TEST - Print first few coefficients
+	// @TEST - print non-zero coefficients
 	for (int l = 0; l <= LMAX; l++) {
 		for (int m = -l; m <= l; m++) {
 			double alm_real = 0.0;
@@ -214,7 +203,8 @@ void expand_spherical_harmonics(
 				alm_imag = alm[2 * (l * (LMAX + 1) + m) + 1];
 			}
 
-			// printf("a_lm[%d,+%d] = (%f, %f)\n", l, m, alm_real, alm_imag);
+			if (fabs(alm_real) > 1E-6 || fabs(alm_imag) > 1E-6)
+				printf("a_lm[%d,+%d] = %f + %fi\n", l, m, alm_real, alm_imag);
 		}
 	}
 }

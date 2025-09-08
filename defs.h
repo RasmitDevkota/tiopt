@@ -36,10 +36,10 @@
 #define RELAXATION_RESOLUTION 1
 #endif
 #ifndef RELAXATION_NX
-#define RELAXATION_NX (NSPH_X * (SPH_R_INT + SPH_R_INT/2))
+#define RELAXATION_NX (NSPH_X * (SPH_R_INT + SPH_R_INT / 2))
 #endif
 #ifndef RELAXATION_NY
-#define RELAXATION_NY (NSPH_Y * (SPH_R_INT + SPH_R_INT/2))
+#define RELAXATION_NY (NSPH_Y * (SPH_R_INT + SPH_R_INT / 2))
 #endif
 #ifndef RELAXATION_NZ
 #define RELAXATION_NZ (ION_HEIGHT_INT + SPH_R_INT * (NSPH_Z - 1))
@@ -57,21 +57,24 @@
 
 // Macros
 #ifndef MAX
-#define MAX(a,b) \
-({ __typeof__ (a) _a = (a); \
-   __typeof__ (b) _b = (b); \
-	_a > _b ? _a : _b; })
+#define MAX(a, b) \
+	({ \
+		__typeof__(a) _a = (a); \
+		__typeof__(b) _b = (b); \
+		_a > _b ? _a : _b; \
+	})
 #endif
 
 #ifndef MIN
-#define MIN(a,b) \
-({ __typeof__ (a) _a = (a); \
-   __typeof__ (b) _b = (b); \
-	_a < _b ? _a : _b; })
+#define MIN(a, b) \
+	({ \
+		__typeof__(a) _a = (a); \
+		__typeof__(b) _b = (b); \
+		_a < _b ? _a : _b; \
+	})
 #endif
 
 #ifndef VLM_SLICE
 #define VLM_SLICE(Vlm, sx, sy, sz) \
-    (&(*Vlm)[((sx) * NSPH_Y * NSPH_Z + (sy) * NSPH_Z + (sz)) * ((LMAX+1)*(LMAX+1)*2)])
+	(&(*Vlm)[((sx) * NSPH_Y * NSPH_Z + (sy) * NSPH_Z + (sz)) * ((LMAX + 1) * (LMAX + 1) * 2)])
 #endif
-

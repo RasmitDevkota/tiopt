@@ -1,6 +1,6 @@
 trap n_electrodes 2
-trap n_electrodes_rf 1
-trap n_electrodes_dc 1
+trap n_electrodes_rf 0
+trap n_electrodes_dc 2
 
 trap electrode_positions 0 (25 0 0)
 trap electrode_positions 1 (50 0 0)

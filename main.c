@@ -7,34 +7,30 @@
 #include <nlopt.h>
 
 #include "defs.h"
-#include "data_structures.h"
 #include "io.h"
-#include "trap_geometry.h"
+#include "data_structures.h"
 #include "electrodynamics.h"
 #include "verlet.h"
 
-// cost function passed to optimization routine
+// Cost function passed to optimization routine
 double cost_function(
     unsigned n,
     const double *x,
     double *grad,
     void *trap_obj
 ) {
-    // the purpose of this function is to compute an aggregate cost of a trap design and transport configuration
+    // The purpose of this function is to compute an aggregate cost of a trap design and transport configuration
     double cost = 0.0;
 
-    // being lazy with memory for now just as a sketch
+    // Being lazy with memory for now just as a sketch
     struct Trap *trap = (struct Trap *)trap_obj;
 
     // %TODO - update trap based on optimization parameters
 
-    // generate the initial mesh object needed from the trap electrodes
-    generate_mesh(trap);
-
-    // solve for the potential energy as a 3D array of data for each electrode individually
+    // Solve for the potential energy as a 3D array of data for each electrode individually
     solve_trap_electrodynamics(trap, RELAXATION);
 
-    // perform ion transport experiments now! we don't know how we will actually structure this part, just an example
+    // Perform ion transport experiments now! we don't know how we will actually structure this part, just an example
     for (int e = 0; e < 5; e++)
     {
         // cost_experiment_e = perform_experiment(trap, e);
@@ -46,7 +42,7 @@ double cost_function(
     return cost;
 }
 
-// main optimization loop
+// Main optimization loop
 int main()
 {
     printf(
@@ -91,12 +87,18 @@ int main()
         "|----------------------------------------------------------------------------------------------------|\n"
     );
 
+	printf("SPH_R=%f\n", SPH_R);
+	printf("SPH_Z_MIN=%f\n", SPH_Z_MIN);
+	printf("SPH_SPACING=%f\n", SPH_SPACING);
+	printf("NSPH_X=%d, NSPH_Y=%d\n", NSPH_X, NSPH_Y);
+	printf("RELAXATION_NX=%d, RELAXATION_NY=%d, RELAXATION_NZ=%d\n", RELAXATION_NX, RELAXATION_NY, RELAXATION_NZ);
 
     double min_cost = 99999;
     const int dim = 12;
 
-    // nlopt setup
     printf("- Constructing optimization problem...\n");
+
+    // nlopt setup
     nlopt_opt opt = nlopt_create(NLOPT_LN_COBYLA, dim);
 
     printf("Setting constraints...\n");
@@ -105,11 +107,14 @@ int main()
     printf("Setting bounds...\n");
     // @TODO - bounds
 
-    printf("Setting tolerances...\n");
+    printf("Setting stopping criteria...\n");
     // @TODO - tolerances
 
-    // generate initial guess trap from file
+	// @TEST - limit number of evaluations to 1 for testing purposes
+	nlopt_set_maxeval(opt, 1);
+
     printf("Constructing initial guess...\n");
+    // Generate initial guess trap from file
     char *trap_filename = "trap.data";
     struct Trap trap;
     generate_trap_from_file(trap_filename, &trap);
@@ -123,6 +128,14 @@ int main()
     printf("Setting objectives...\n");
     nlopt_set_min_objective(opt, cost_function, &trap);
 
+    printf("Calling objective once...\n");
+    cost_function(
+      dim,
+      x,
+      NULL,
+      &trap
+    );
+
     printf("Optimizing...\n");
     if (nlopt_optimize(opt, x, &min_cost) < 0)
     {
@@ -130,7 +143,7 @@ int main()
     }
     else
     {
-        printf("found minimum at f(");
+        printf("Found minimum at f(");
         for (int k = 0; k < dim; k++)
         {
             printf("%g", x[k]);

@@ -6,7 +6,6 @@ enum ElectrodynamicsSolver
 	// In-house solvers:
 	RELAXATION,
 	// External solvers:
-	SPARSELIZARD,
 };
 
 void solve_trap_electrodynamics(
