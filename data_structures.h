@@ -26,7 +26,8 @@ struct PulseProgram
 	double *n_qubits;
 	double *laser_pulse_frequencies;
 	double *laser_pulse_times;
+	double *laser_pulse_powers;
 	double *laser_pulse_durations;
-	double *laser_pulse_target;
+	double *laser_pulse_targets;
 };
 
