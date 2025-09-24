@@ -12,6 +12,12 @@ struct Electrode
   double (*Vlm)[]; // electric potential in spherical harmonics expansion; implicity, length Vlm_len in each component
 };
 
+struct LaserPositions
+{
+       double *laser_frequencies;
+       double positions[n_laser_frequencies][][3];
+};
+
 struct Trap
 {
   int n_electrodes; // non-constant in case we want to add electrodes to a Trap
@@ -19,6 +25,7 @@ struct Trap
   int n_electrodes_dc; // non-constant in case we want to add electrodes to a Trap
   struct Electrode (*electrodes)[]; // implicitly, length n_electrodes
   double (*electrode_positions)[][3]; // stores a list of the coordinates of all the electrodes; implicity, length n_electrodes-by-3
+  struct LaserPositions laser_positions;
 };
 
 struct PulseProgram
@@ -31,3 +38,10 @@ struct PulseProgram
 	double *laser_pulse_targets;
 };
 
+
+struct TransportProgram 
+{
+  double *arrival_times;
+  int *target_qubits;
+  double *destinations[3];
+};
