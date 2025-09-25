@@ -1,0 +1,15 @@
+# Required
+version: 2
+
+# Set the OS, Python version and other tools you might need
+build:
+  os: ubuntu-24.04
+  tools:
+    c: "23"
+  commands:
+    doxygen ./Doxyfile
+
+# Build documentation in additional formats
+formats:
+  - pdf
+

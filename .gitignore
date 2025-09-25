@@ -13,3 +13,7 @@ sl_outputs/
 *.vtk
 *.vtu
 *.pos
+
+# Documentation
+docs/**
+
