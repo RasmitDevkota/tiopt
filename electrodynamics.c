@@ -19,7 +19,8 @@ void solve_trap_electrodynamics(struct Trap *trap, enum ElectrodynamicsSolver el
 
 		if (electrodynamics_solver == RELAXATION)
 		{
-			solver_relaxation(&electrode, (int) 1E1, 0);
+			// @TEST
+			solver_relaxation(&electrode, (int) 1E3, 0);
 		}
 	}
 }

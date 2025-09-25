@@ -11,6 +11,7 @@
 #include "data_structures.h"
 #include "electrodynamics.h"
 #include "verlet.h"
+#include "experiments.h"
 
 // Cost function passed to optimization routine
 double cost_function(
@@ -31,13 +32,9 @@ double cost_function(
     solve_trap_electrodynamics(trap, RELAXATION);
 
     // Perform ion transport experiments now! we don't know how we will actually structure this part, just an example
-    for (int e = 0; e < 5; e++)
-    {
-        // cost_experiment_e = perform_experiment(trap, e);
-        // cost += cost_experiment_e;
-    }
-
-    cost += 0.5;
+	int experiment_list[2] = { IDLE, BACK_AND_FORTH };
+    for (int e = 0; e < 2; e++)
+		run_experiment(experiment_list[e], &cost);
 
     return cost;
 }
