@@ -11,6 +11,37 @@ struct IonParameters
 	// @TODO - add quantum mechanical properties
 };
 
+// Abstract trap data
+enum ZoneType
+{
+	EMPTY_ZONE = 1 << 0,
+	LOAD_ZONE = 1 << 1,
+	COOL_ZONE = 1 << 2,
+	GATE_ZONE = 1 << 3,
+	MEASURE_ZONE = 1 << 4,
+	STORAGE_ZONE = 1 << 5,
+};
+
+struct ZoneNode
+{
+	enum ZoneType zone_type;
+	int zone_capacity;
+};
+
+enum TransportEdgeType
+{
+	LINEAR_SEGMENT = 1 << 0,
+	T_JUNCTION_SEGMENT = 1 << 1,
+	X_JUNCTION_SEGMENT = 1 << 2,
+	Y_JUNCTION_SEGMENT = 1 << 3,
+};
+
+struct TrapGraph
+{
+	struct ZoneNode *zone_nodes;
+	struct TransportEdge *transport_edges;
+};
+
 // Trap data
 struct Electrode
 {
@@ -41,7 +72,7 @@ struct Trap
 };
 
 // Abstract quantum circuit data
-enum Operation
+enum OperationType
 {
 	TRANSPORT = 1 << 0,
 	COOL = 1 << 1,
@@ -51,25 +82,25 @@ enum Operation
 	LASER_PULSE = COOL | DETECT | DESHELVE | QUBIT
 };
 
-struct Node
+struct InstructionNode
 {
-	enum Operation operation;
+	enum OperationType operation_type;
 	double operation_duration;
-	int *target_qubits;
+	int *target_ions;
 	// @TODO - do we need to store both prev_nodes and next_nodes?
-	struct Node *prev_nodes;
-	struct Node *next_nodes;
+	struct InstructionNode *prev_nodes;
+	struct InstructionNode *next_nodes;
 };
 
-struct Graph
+struct CircuitGraph
 {
-	struct Node *Nodes;
+	struct InstructionNode *instruction_nodes;
 };
 
 // Physical quantum circuit data
 struct TransportProgram
 {
-	int n_qubits;
+	int n_ions;
 	int n_transports;
 	double *arrival_times; // implicitly, length n_transports
 	int *transport_n_targets_list; // implicitly, length n_transports
@@ -79,7 +110,7 @@ struct TransportProgram
 
 struct PulseProgram
 {
-	int n_qubits;
+	int n_ions;
 	int n_pulses;
 	double *pulse_frequencies; // implicitly, length n_pulses
 	double *pulse_times; // implicitly, length n_pulses
