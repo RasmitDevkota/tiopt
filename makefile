@@ -21,10 +21,10 @@ CFLAGS = -O1 -Wall -fPIC -g
 CXXFLAGS = -O1 -Wall -fPIC -g
 
 # Source files (C)
-C_SRC = ti_utils.c verlet.c electrodynamics.c io.c main.c
+C_SRC = ti_utils.c experiments.c verlet.c electrodynamics.c io.c main.c
 
 # Object files
-C_OBJ = ti_utils.o verlet.o electrodynamics.o io.o main.o
+C_OBJ = ti_utils.o experiments.o verlet.o electrodynamics.o io.o main.o
 
 # Output binary
 OUTPUT = tiopt

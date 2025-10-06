@@ -8,7 +8,7 @@ void run_experiment
 	double *cost
 )
 {
-	printf("run_experiment is not implemented yet!");
+	printf("run_experiment is not implemented yet!\n");
 	*cost += 0.0;
 }
 
