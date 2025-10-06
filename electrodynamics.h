@@ -8,18 +8,25 @@ enum ElectrodynamicsSolver
 	// External solvers:
 };
 
-void solve_trap_electrodynamics(
+void solve_trap_electrodynamics
+(
 	struct Trap *trap,
 	enum ElectrodynamicsSolver electrodynamics_solver
 );
 
-void solver_relaxation(
+void solver_relaxation
+(
 	struct Electrode *electrode,
+	double (*V)[RELAXATION_NX][RELAXATION_NY][RELAXATION_NZ],
+	int dx,
+	int dy,
+	int dz,
 	int max_iterations,
 	int chebyshev_acceleration
 );
 
-void sample_dh1(
+void sample_dh1
+(
 	const int NX,
 	const int NY,
 	const int NZ,
@@ -36,7 +43,8 @@ void sample_dh1(
 extern void compute_shcoeffs_cmplx(double *grid, int *nlat, int *nlon, int *lmax, double *alm);
 extern void compute_shcoeffs_real(double *grid, int *nlat, int *nlon, int *lmax, double *alm);
 
-void expand_spherical_harmonics(
+void expand_spherical_harmonics
+(
 	double grid[NLAT][NLON],
 	double *alm
 );

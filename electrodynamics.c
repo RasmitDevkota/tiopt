@@ -8,7 +8,11 @@
 #include "data_structures.h"
 #include "ti_utils.h"
 
-void solve_trap_electrodynamics(struct Trap *trap, enum ElectrodynamicsSolver electrodynamics_solver)
+void solve_trap_electrodynamics
+(
+	struct Trap *trap,
+	enum ElectrodynamicsSolver electrodynamics_solver
+)
 {
 	// @TODO - implement parallelism
 	for (int e = 0; e < trap->n_electrodes; e++)
@@ -19,25 +23,73 @@ void solve_trap_electrodynamics(struct Trap *trap, enum ElectrodynamicsSolver el
 
 		if (electrodynamics_solver == RELAXATION)
 		{
-			// @TEST
-			solver_relaxation(&electrode, (int) 1E3, 0);
+			double (*V)[RELAXATION_NX][RELAXATION_NY][RELAXATION_NZ] = calloc(RELAXATION_NX * RELAXATION_NY * RELAXATION_NZ, sizeof(double));
+
+			int dx = 1;
+			int dy = 1;
+			int dz = 1;
+
+			solver_relaxation(
+				&electrode,
+				V,
+				dx, dy, dz,
+				(int) 1E3,
+				0
+			);
+
+			printf("Writing electric potential to CSV format...\n");
+			FILE *f = fopen("V.txt", "w");
+			for (int x = 0; x < RELAXATION_NX; x++)
+				for (int y = 0; y < RELAXATION_NY; y++)
+					for (int z = 0; z < +RELAXATION_NZ; z++)
+						if ((*V)[x][y][z] > 0.0 || (*V)[x][y][z] < 0.0)
+							fprintf(f, "%d,%d,%d,%f\n", x, y, z, (*V)[x][y][z]);
+			fclose(f);
+
+			printf("Sampling grid and expanding potential in spherical harmonics basis...\n");
+			for (int sx = 0; sx < NSPH_X; sx++)
+				for (int sy = 0; sy < NSPH_Y; sy++)
+					for (int sz = 0; sz < NSPH_Z; sz++)
+					{
+						double x_c = sx * SPH_SPACING + SPH_R;
+						double y_c = sy * SPH_SPACING + SPH_R;
+						double z_c = sz * SPH_SPACING + SPH_Z_MIN + 1; // # @TEST - check the +1
+						printf("Sphere at index (%d, %d, %d), position (%f, %f, %f)\n", sx, sy, sz, x_c, y_c, z_c);
+
+						// Sample grid based on method by Driscoll and Healy (1994)
+						double grid[NLAT][NLON];
+						sample_dh1(
+							RELAXATION_NX, RELAXATION_NY, RELAXATION_NZ,
+							V,
+							x_c, y_c, z_c,
+							grid,
+							dx, dy, dz
+						);
+
+						// Compute the spherical harmonics expansion of the potential energy contribution
+						expand_spherical_harmonics(
+							grid,
+							VLM_SLICE(electrode.Vlm, sx, sy, sz)
+						);
+					}
+
+			free(V);
 		}
 	}
 }
 
-void solver_relaxation(
+void solver_relaxation
+(
 	struct Electrode *electrode,
+	double (*V)[RELAXATION_NX][RELAXATION_NY][RELAXATION_NZ],
+	int dx,
+	int dy,
+	int dz,
 	int max_iterations,
 	int chebyshev_acceleration
 )
 {
 	printf("Constructing relaxation problem...\n");
-
-	int dx = 1;
-	int dy = 1;
-	int dz = 1;
-
-	double (*V)[RELAXATION_NX][RELAXATION_NY][RELAXATION_NZ] = calloc(RELAXATION_NX * RELAXATION_NY * RELAXATION_NZ, sizeof(double));
 
 	for (int x = 0; x < RELAXATION_NX; x++)
 		for (int y = 0; y < RELAXATION_NY; y++)
@@ -102,36 +154,11 @@ void solver_relaxation(
 		xi_max = MAX(xi_it_max, xi_max);
 		xi_it_max_prev = xi_it_max;
 	}
-
-	printf("Sampling grid and expanding potential in spherical harmonics basis...\n");
-	for (int sx = 0; sx < NSPH_X; sx++)
-		for (int sy = 0; sy < NSPH_Y; sy++)
-			for (int sz = 0; sz < NSPH_Z; sz++)
-			{
-				double x_c = sx * SPH_SPACING + SPH_R;
-				double y_c = sy * SPH_SPACING + SPH_R;
-				double z_c = sz * SPH_SPACING + SPH_Z_MIN + 1; // # @TEST - check the +1
-				printf("Sphere at index (%d, %d, %d), position (%f, %f, %f)\n", sx, sy, sz, x_c, y_c, z_c);
-
-				// Sample grid based on method by Driscoll and Healy (1994)
-				double grid[NLAT][NLON];
-				sample_dh1(
-					RELAXATION_NX, RELAXATION_NY, RELAXATION_NZ,
-					V,
-					x_c, y_c, z_c,
-					grid,
-					dx, dy, dz
-				);
-
-				// Compute the spherical harmonics expansion of the potential energy contribution
-				expand_spherical_harmonics(grid, VLM_SLICE(electrode->Vlm, sx, sy, sz));
-			}
-
-	free(V);
 }
 
-// @TODO - generalize syntax and move to ti_utils.c for generality
-void sample_dh1(
+// @TODO - consider generalizing syntax and moving to ti_utils.c for generality
+void sample_dh1
+(
 	const int NX,
 	const int NY,
 	const int NZ,
@@ -143,7 +170,8 @@ void sample_dh1(
 	double dx,
 	double dy,
 	double dz
-) {
+)
+{
 	for (int i = 0; i < NLAT; i++) {
 		double phi = (double)i/NLAT * PI;
 
@@ -157,7 +185,7 @@ void sample_dh1(
 			double sample_coord[3] = { x_c + R_sin_phi * cos(theta), y_c + R_sin_phi * sin(theta), z_c + R_cos_phi };
 
 			interpolate_3d(
-				NX, NY, NZ,
+				RELAXATION_NX, RELAXATION_NY, RELAXATION_NZ,
 				V,
 				sample_coord,
 				&grid[i][j],
@@ -172,10 +200,12 @@ void sample_dh1(
 }
 
 // @TODO - generalize syntax and move to ti_utils.c for generality
-void expand_spherical_harmonics(
+void expand_spherical_harmonics
+(
 	double grid[NLAT][NLON],
 	double *alm
-) {
+)
+{
 	// Define new variables so that Fortran recognizes the types
 	int nlat = NLAT;
 	int nlon = NLON;
