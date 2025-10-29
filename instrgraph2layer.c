@@ -2,7 +2,7 @@
 #include "defs.h"
 #include "data_structures.h"
 
-struct InstructionNode* graph2layer(struct CircuitGraph instrgraph, int numions) //given the instructions find first set of instructions that can be executed in a single layer
+void graph2layer(struct CircuitGraph instrgraph, int numions) //given the instructions find first set of instructions that can be executed in a single layer
 {
     int *ionhashtable = (int*) malloc(sizeof(int)*numions); //count ion appearances, no entry should be greater than one per layer
     for (int i = 0; i < numions; i++) {
