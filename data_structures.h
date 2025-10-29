@@ -9,6 +9,9 @@ struct IonParameters
 	double atomic_mass;
 	double charge;
 	// @TODO - add quantum mechanical properties
+	double omega_SP;
+	double omega_SD;
+	double gamma_list;
 };
 
 // Abstract trap data
@@ -86,15 +89,20 @@ struct InstructionNode
 {
 	enum OperationType operation_type;
 	double operation_duration;
-	int *target_ions;
+	int n_target_ions;
+	int *target_ions; // implicitly, length n_target_ions
 	// @TODO - do we need to store both prev_nodes and next_nodes?
-	struct InstructionNode *prev_nodes;
-	struct InstructionNode *next_nodes;
+	int n_prev_nodes;
+	int n_next_nodes;
+	struct InstructionNode *prev_nodes; // implicitly, length n_prev_nodes
+	struct InstructionNode *next_nodes; // implicitly, length n_next_nodes
 };
 
 struct CircuitGraph
 {
-	struct InstructionNode *instruction_nodes;
+	int n_instruction_nodes;
+	struct InstructionNode *instruction_nodes; // implicitly, length n_instruction_nodes
+	int *layer_idxs; // implicitly, length n_instruction_nodes
 };
 
 // Physical quantum circuit data
