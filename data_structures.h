@@ -92,6 +92,7 @@ struct InstructionNode
 	int n_target_ions;
 	int *target_ions; // implicitly, length n_target_ions
 	// @TODO - do we need to store both prev_nodes and next_nodes?
+	int graphindex; // used to determine position in node array for writing to layer_idxs
 	int n_prev_nodes;
 	int n_next_nodes;
 	struct InstructionNode *prev_nodes; // implicitly, length n_prev_nodes
