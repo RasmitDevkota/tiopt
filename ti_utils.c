@@ -6,7 +6,7 @@
 #include "defs.h"
 
 // Compute centered difference gradient
-void grad(
+void grad1d(
 	const int f_len,
 	double (*f)[f_len],
 	double (*grad_f)[f_len],
@@ -157,5 +157,77 @@ int point_in_polygon_zslice(
             inside = 1 - inside;
 
     return inside;
+}
+
+// Compute the Hessian
+void compute_hessian_3d(
+	const int f_len_x,
+	const int f_len_y,
+	const int f_len_z,
+	double (*f)[f_len_x][f_len_y][f_len_z],
+	double p_rel[3],
+	double (*H)[3][3],
+	double h[3],
+	double dx,
+	double dy,
+	double dz
+)
+{
+	int x = (int) round(p_rel[0] * dx);
+	int y = (int) round(p_rel[1] * dy);
+	int z = (int) round(p_rel[2] * dz);
+
+	if (
+		(x < 0 || x > f_len_x-1) ||
+		(y < 0 || y > f_len_y-1) ||
+		(z < 0 || z > f_len_z-1)
+	)
+	{
+		printf("Cannot compute value of Hessian at point index (%.13d,%.13d,%.13d) - too close to edge of function at (%d,%d,%d).\n", x, y, z, f_len_x, f_len_y, f_len_z);
+		return;
+	}
+
+	int xph = (int) x+h[0];
+	int xmh = (int) x-h[0];
+	int yph = (int) y+h[0];
+	int ymh = (int) y-h[0];
+	int zph = (int) z+h[0];
+	int zmh = (int) z-h[0];
+
+	double f_xyz = (*f)[x][y][z];
+	double f_xph = (*f)[xph][y][z];
+	double f_xmh = (*f)[xmh][y][z];
+	double f_yph = (*f)[x][yph][z];
+	double f_ymh = (*f)[x][ymh][z];
+	double f_zph = (*f)[x][y][zph];
+	double f_zmh = (*f)[x][y][zmh];
+
+	double f_xphyph = (*f)[xph][yph][z];
+	double f_xmhyph = (*f)[xmh][yph][z];
+	double f_xphymh = (*f)[xph][ymh][z];
+	double f_xmhymh = (*f)[xmh][ymh][z];
+
+	double f_xphzph = (*f)[xph][y][zph];
+	double f_xmhzph = (*f)[xmh][y][zmh];
+	double f_xphzmh = (*f)[xph][y][zph];
+	double f_xmhzmh = (*f)[xmh][y][zmh];
+
+	double f_yphzph = (*f)[x][yph][zph];
+	double f_ymhzph = (*f)[x][ymh][zph];
+	double f_yphzmh = (*f)[x][yph][zmh];
+	double f_ymhzmh = (*f)[x][ymh][zmh];
+
+	(*H)[0][0] = (f_xph - 2 * f_xyz + f_xmh)/pow(h[0], 2);
+	(*H)[1][1] = (f_yph - 2 * f_xyz + f_ymh)/pow(h[1], 2);
+	(*H)[2][2] = (f_zph - 2 * f_xyz + f_zmh)/pow(h[1], 2);
+
+	(*H)[0][1] = (f_xphyph - f_xphymh - f_xmhyph + f_xmhymh)/(4 * h[0] * h[1]);
+	(*H)[0][2] = (f_xphzph - f_xphzmh - f_xmhzph + f_xmhzmh)/(4 * h[0] * h[2]);
+
+	(*H)[1][2] = (f_yphzph - f_yphzmh - f_ymhzph + f_ymhzmh)/(4 * h[1] * h[2]);
+
+	(*H)[1][0] = (*H)[1][0];
+	(*H)[2][0] = (*H)[0][2];
+	(*H)[2][1] = (*H)[1][2];
 }
 
