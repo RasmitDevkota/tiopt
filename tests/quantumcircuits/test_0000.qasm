@@ -15,5 +15,5 @@ cz qreg[1], qreg[3];
 cz qreg[0], qreg[3];
 cz qreg[1], qreg[2];
 
-measure qreg;
+measure qreg, creg;
 
