@@ -12,6 +12,7 @@
 #include "electrodynamics.h"
 #include "verlet.h"
 #include "experiments.h"
+#include "transport.h"
 
 // Cost function passed to optimization routine
 double cost_function(
@@ -40,8 +41,7 @@ double cost_function(
 }
 
 // Main optimization loop
-int main()
-{
+int main() {
     printf(
         "|=---------------------------------------------------------------------------------------------------|\n"
         "|                                                                                                    |\n"
@@ -84,87 +84,126 @@ int main()
         "|----------------------------------------------------------------------------------------------------|\n"
     );
 
-	printf("SPH_R=%f\n", SPH_R);
-	printf("SPH_Z_MIN=%f\n", SPH_Z_MIN);
-	printf("SPH_SPACING=%f\n", SPH_SPACING);
-	printf("NSPH_X=%d, NSPH_Y=%d\n", NSPH_X, NSPH_Y);
-	printf("RELAXATION_NX=%d, RELAXATION_NY=%d, RELAXATION_NZ=%d\n", RELAXATION_NX, RELAXATION_NY, RELAXATION_NZ);
+    printf("\n");
 
-    double min_cost = 99999;
-    const int dim = 12;
+// TODO: turn this into its own file/option
+// 	printf("SPH_R=%f\n", SPH_R);
+// 	printf("SPH_Z_MIN=%f\n", SPH_Z_MIN);
+// 	printf("SPH_SPACING=%f\n", SPH_SPACING);
+// 	printf("NSPH_X=%d, NSPH_Y=%d\n", NSPH_X, NSPH_Y);
+// 	printf("RELAXATION_NX=%d, RELAXATION_NY=%d, RELAXATION_NZ=%d\n", RELAXATION_NX, RELAXATION_NY, RELAXATION_NZ);
 
-    printf("- Constructing optimization problem...\n");
+//     double min_cost = 99999;
+//     const int dim = 12;
 
-    // nlopt setup
-    nlopt_opt opt = nlopt_create(NLOPT_LN_COBYLA, dim);
+//     printf("- Constructing optimization problem...\n");
 
-    printf("Setting constraints...\n");
-    // @TODO - constraints
+//     // nlopt setup
+//     nlopt_opt opt = nlopt_create(NLOPT_LN_COBYLA, dim);
 
-    printf("Setting bounds...\n");
-    // @TODO - bounds
+//     printf("Setting constraints...\n");
+//     // @TODO - constraints
 
-    printf("Setting stopping criteria...\n");
-    // @TODO - tolerances
+//     printf("Setting bounds...\n");
+//     // @TODO - bounds
 
-	// @TEST - limit number of evaluations to 1 for testing purposes
-	nlopt_set_maxeval(opt, 1);
+//     printf("Setting stopping criteria...\n");
+//     // @TODO - tolerances
 
-    printf("Constructing initial guess...\n");
-    // Generate initial guess trap from file
-    char *trap_filename = "trap.data";
-    struct Trap trap;
-    generate_trap_from_file(trap_filename, &trap);
+// 	// @TEST - limit number of evaluations to 1 for testing purposes
+// 	nlopt_set_maxeval(opt, 1);
 
-    double x[dim];
-    for (int i = 0; i < dim; i++)
-    {
-        x[i] = 0.0;
-    }
+//     printf("Constructing initial guess...\n");
+//     // Generate initial guess trap from file
+//     char *trap_filename = "trap.data";
+//     struct Trap trap;
+//     generate_trap_from_file(trap_filename, &trap);
 
-    printf("Setting objectives...\n");
-    nlopt_set_min_objective(opt, cost_function, &trap);
+//     double x[dim];
+//     for (int i = 0; i < dim; i++)
+//     {
+//         x[i] = 0.0;
+//     }
 
-    printf("Calling objective once...\n");
-    cost_function(
-      dim,
-      x,
-      NULL,
-      &trap
-    );
+//     printf("Setting objectives...\n");
+//     nlopt_set_min_objective(opt, cost_function, &trap);
 
-    printf("Optimizing...\n");
-    if (nlopt_optimize(opt, x, &min_cost) < 0)
-    {
-        printf("nlopt failed!\n");
-    }
-    else
-    {
-        printf("Found minimum at f(");
-        for (int k = 0; k < dim; k++)
-        {
-            printf("%g", x[k]);
+//     printf("Calling objective once...\n");
+//     cost_function(
+//       dim,
+//       x,
+//       NULL,
+//       &trap
+//     );
 
-            if (k < dim-1)
-            {
-                printf(",");
-            }
+//     printf("Optimizing...\n");
+//     if (nlopt_optimize(opt, x, &min_cost) < 0)
+//     {
+//         printf("nlopt failed!\n");
+//     }
+//     else
+//     {
+//         printf("Found minimum at f(");
+//         for (int k = 0; k < dim; k++)
+//         {
+//             printf("%g", x[k]);
+
+//             if (k < dim-1)
+//             {
+//                 printf(",");
+//             }
+//         }
+//         printf(") = %0.10g\n", min_cost);
+//     }
+
+//     // Free malloc'd memory
+//     free(trap.electrode_positions);
+
+//     for (int e = 0; e < trap.n_electrodes; e++)
+//     {
+//         free((*trap.electrodes)[e].vertices);
+//         free((*trap.electrodes)[e].edges);
+//         free((*trap.electrodes)[e].Vlm);
+//     }
+
+//     free(trap.electrodes);
+
+    int option = -1;
+
+    printf("Welcome to tiopt!\n");
+
+    while (option != 0) {
+        printf("\nEnter a number to get started!\n");
+        printf("(0) Quit\n");
+        printf("(1) Get ion transport schedule for default inputs (in progress).\n");
+        printf("Enter your option and press enter: ");
+
+        int result = scanf("%d", &option);
+        printf("\n");
+
+        if (result != 1) {
+            printf("Invalid input.\n");
+            printf("\n---------------------------------------------------------------------------------\n");
+            int i;
+            while ((i = getchar()) != '\n' && i != EOF);
+            continue;
         }
-        printf(") = %0.10g\n", min_cost);
+
+        switch (option) {
+            case 0:
+                printf("Quitting tiopt...\n");
+                break;
+            case 1:
+                struct TransportProgram *transportProgram = simple_transport_schedule();
+                free(transportProgram);
+                printf("\n---------------------------------------------------------------------------------\n");
+                break;
+            default:
+                printf("Not an option.\n");
+                printf("\n---------------------------------------------------------------------------------\n");
+                break;
+        }
     }
-
-    // Free malloc'd memory
-    free(trap.electrode_positions);
-
-    for (int e = 0; e < trap.n_electrodes; e++)
-    {
-        free((*trap.electrodes)[e].vertices);
-        free((*trap.electrodes)[e].edges);
-        free((*trap.electrodes)[e].Vlm);
-    }
-
-    free(trap.electrodes);
 
     return 0;
 }
-
