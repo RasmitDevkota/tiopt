@@ -23,26 +23,37 @@ enum ZoneType
 	GATE_ZONE = 1 << 3,
 	MEASURE_ZONE = 1 << 4,
 	STORAGE_ZONE = 1 << 5,
+	JUNCTION_ZONE = 1 << 6,
+	PRE_JUNCTION_ZONE = 1 << 7,
 };
 
 struct ZoneNode
 {
 	enum ZoneType zone_type;
 	int zone_capacity;
+	int zone_occupancy;
 };
 
 enum TransportEdgeType
 {
 	LINEAR_SEGMENT = 1 << 0,
-	T_JUNCTION_SEGMENT = 1 << 1,
-	X_JUNCTION_SEGMENT = 1 << 2,
-	Y_JUNCTION_SEGMENT = 1 << 3,
+	THREE_WAY_JUNCTION_SEGMENT = 1 << 1,
+	FOUR_WAY_JUNCTION_SEGMENT = 1 << 2,
+};
+
+struct TransportEdge
+{
+	enum TransportEdgeType edge_type;
+	int n_zones;
+	struct ZoneNode *zone_nodes; // implicitly, length n_zones
 };
 
 struct TrapGraph
 {
-	struct ZoneNode *zone_nodes;
-	struct TransportEdge *transport_edges;
+	int n_zones;
+	int n_transport_edges;
+	struct ZoneNode *zone_nodes; // implicitly, length n_zones
+	struct TransportEdge *transport_edges; // implicitly, length n_transport_edges
 };
 
 // Trap data
@@ -90,20 +101,18 @@ struct InstructionNode
 	enum OperationType operation_type;
 	double operation_duration;
 	int n_target_ions;
-	int *target_ions; // implicitly, length n_target_ions
+	int *target_ions; // implicitly, length n_target_ions (starts at 1)
 	// @TODO - do we need to store both prev_nodes and next_nodes?
-	int graphindex; // used to determine position in node array for writing to layer_idxs
+	int graphindex; // used to determine position in node array for writing to layer_idxs (starts at 1)
 	int n_prev_nodes;
-	int n_next_nodes;
 	struct InstructionNode *prev_nodes; // implicitly, length n_prev_nodes
-	struct InstructionNode *next_nodes; // implicitly, length n_next_nodes
 };
 
 struct CircuitGraph
 {
 	int n_instruction_nodes;
 	struct InstructionNode *instruction_nodes; // implicitly, length n_instruction_nodes
-	int *layer_idxs; // implicitly, length n_instruction_nodes
+	int *layer_idxs; // implicitly, length n_instruction_nodes (starts at 1)
 };
 
 // Physical quantum circuit data
@@ -113,7 +122,7 @@ struct TransportProgram
 	int n_transports;
 	double *arrival_times; // implicitly, length n_transports
 	int *transport_n_targets_list; // implicitly, length n_transports
-	int (*transport_targets_list); // implicitly, length n_transports-by-[transport_n_targets]
+	int **transport_targets_list; // implicitly, length n_transports-by-[transport_n_targets_list]
 	double (*destinations)[3]; // implicitly, length n_transports-by-3
 };
 
