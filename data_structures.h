@@ -110,6 +110,7 @@ struct InstructionNode
 
 struct CircuitGraph
 {
+	int n_ions;
 	int n_instruction_nodes;
 	struct InstructionNode *instruction_nodes; // implicitly, length n_instruction_nodes
 	int *layer_idxs; // implicitly, length n_instruction_nodes (starts at 1)

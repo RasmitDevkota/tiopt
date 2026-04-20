@@ -8,3 +8,7 @@ struct TransportProgram* generate_transport_schedule
 );
 
 struct TransportProgram* simple_transport_schedule ();
+
+struct TransportProgram* simple_transport_schedule_qasm_input();
+
+void print_transport_program(struct TransportProgram *transportProgram);

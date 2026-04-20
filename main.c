@@ -176,6 +176,7 @@ int main() {
         printf("\nEnter a number to get started!\n");
         printf("(0) Quit\n");
         printf("(1) Get ion transport schedule for default inputs (in progress).\n");
+        printf("(2) Get ion transport schedule for test qasm input (in progress).\n");
         printf("Enter your option and press enter: ");
 
         int result = scanf("%d", &option);
@@ -194,8 +195,13 @@ int main() {
                 printf("Quitting tiopt...\n");
                 break;
             case 1:
-                struct TransportProgram *transportProgram = simple_transport_schedule();
-                free(transportProgram);
+                struct TransportProgram *simpleTransportProgram = simple_transport_schedule();
+                free(simpleTransportProgram);
+                printf("\n---------------------------------------------------------------------------------\n");
+                break;
+            case 2:
+                struct TransportProgram *simpleTransportProgramQasmInput = simple_transport_schedule_qasm_input();
+                free(simpleTransportProgramQasmInput);
                 printf("\n---------------------------------------------------------------------------------\n");
                 break;
             default:
