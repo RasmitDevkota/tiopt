@@ -2,6 +2,8 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
+#include <ctype.h>
 
 #include "data_structures.h"
 
@@ -30,11 +32,14 @@ struct TransportProgram* generate_transport_schedule
     struct TransportProgram* transportProgram
 )
 {
-    // transportProgram->n_ions must be initialized
-    if (transportProgram->n_ions <= 0) {
-        printf("ERROR: Number of ions in transport program must be initialized.\n");
+    // circuitGraph->n_ions must be initialized
+    if (circuitGraph->n_ions <= 0) {
+        printf("ERROR: Number of ions in circuit graph must be initialized.\n");
         return NULL;
     }
+
+    // Set number of ions
+    transportProgram->n_ions = circuitGraph->n_ions;
 
     // Set number of transports
     transportProgram->n_transports = circuitGraph->n_instruction_nodes;
@@ -59,12 +64,13 @@ struct TransportProgram* generate_transport_schedule
     // Find how many layers in circuit (may be redundant)
     int max_layer = 0;
     for (int i = 0; i < circuitGraph->n_instruction_nodes; i++) {
+        printf("Instruction %d is in layer %d\n", i + 1, circuitGraph->layer_idxs[i]);
         if (circuitGraph->layer_idxs[i] > max_layer) {
             max_layer = circuitGraph->layer_idxs[i];
         }
     }
     
-    printf("Number of layers in circuit: %d\n", max_layer);
+    printf("Number of layers in circuit: %d\n\n", max_layer);
 
     // Empty circuit
     if (max_layer == 0) {
@@ -180,6 +186,259 @@ struct TransportProgram* generate_transport_schedule
     return transportProgram;
 }
 
+// Helper to get operation type from QASM code
+enum OperationType get_operation_type(const char *op)
+{
+    if (strcmp(op, "h") == 0) return QUBIT;
+    if (strcmp(op, "x") == 0) return QUBIT;
+    if (strcmp(op, "y") == 0) return QUBIT;
+    if (strcmp(op, "z") == 0) return QUBIT;
+
+    if (strcmp(op, "cx") == 0) return QUBIT;
+    if (strcmp(op, "cy") == 0) return QUBIT;
+    if (strcmp(op, "cz") == 0) return QUBIT;
+
+    if (strcmp(op, "measure") == 0) return DETECT;
+
+    return 0;
+}
+
+// Helper to parse qubit indices from QASM CODE
+int parse_qubit_index(const char *token)
+{
+    if (strncmp(token, "qreg[", 5) != 0) {
+        return -1;
+    }
+
+    const char *lbracket = strchr(token, '[');
+    if (!lbracket) return -1;
+
+    return atoi(lbracket + 1);
+}
+
+// Helper to determine whether a QASM line is an instruction node
+int is_instruction_line(const char *line)
+{
+    // skip leading whitespace
+    while (isspace(*line)) line++;
+
+    // ignore empty lines
+    if (*line == '\0' || *line == '\n') return 0;
+
+    // ignore declarations
+    if (strncmp(line, "qubit", 5) == 0) return 0;
+    if (strncmp(line, "bit", 3) == 0) return 0;
+
+    // ignore comments
+    if (strncmp(line, "//", 2) == 0) return 0;
+
+    return 1;
+}
+
+// Helper to determine number of instruction nodes in QASM code
+// int count_instruction_nodes(const char *filename)
+// {
+//     FILE *fp = fopen(filename, "r");
+//     if (!fp) {
+//         printf("ERROR: Could not open file\n");
+//         return -1;
+//     }
+
+//     char line[256];
+//     int count = 0;
+
+//     while (fgets(line, sizeof(line), fp)) {
+//         if (is_instruction_line(line)) {
+//             count++;
+//         }
+//     }
+
+//     fclose(fp);
+//     return count;
+// }
+
+// Helper to get find number of qubits from QASM CODE
+// int get_max_qubit_index(const char *filename)
+// {
+//     FILE *fp = fopen(filename, "r");
+//     if (!fp) {
+//         printf("ERROR: Could not open file\n");
+//         return -1;
+//     }
+
+//     char line[256];
+//     int max_index = -1;
+
+//     while (fgets(line, sizeof(line), fp)) {
+
+//         char *token = strtok(line, " ,;\n");
+//         while (token) {
+
+//             int idx = parse_qubit_index(token);
+//             if (idx >= 0 && idx > max_index) {
+//                 max_index = idx;
+//             }
+
+//             token = strtok(NULL, " ,;\n");
+//         }
+//     }
+
+//     fclose(fp);
+//     return max_index;
+// }
+
+// Parses QASM file and turns it into circuit graph
+struct CircuitGraph* parse_qasm(const char *filename)
+{
+    FILE *fp = fopen(filename, "r");
+    if (!fp) {
+        printf("ERROR: Could not open file\n");
+        return NULL;
+    }
+
+    int nodeCount = 0;
+    int max_index = -1;
+    char line[256];
+
+    while (fgets(line, sizeof(line), fp)) {
+        char line_copy[256];
+        strcpy(line_copy, line);
+
+        if (is_instruction_line(line_copy)) {
+            nodeCount++;
+        }
+
+        char *token = strtok(line, " ,;\n");
+        while (token) {
+            int idx = parse_qubit_index(token);
+            if (idx >= 0 && idx > max_index) {
+                max_index = idx;
+            }
+
+            
+
+            token = strtok(NULL, " ,;\n");
+        }
+    }
+
+    struct CircuitGraph *graph = (struct CircuitGraph *)malloc(sizeof(struct CircuitGraph));
+    graph->n_ions = max_index + 1;
+    graph->n_instruction_nodes = nodeCount;
+    graph->instruction_nodes = (struct InstructionNode *)malloc(sizeof(struct InstructionNode) * nodeCount);
+    graph->layer_idxs = (int *)malloc(sizeof(int) * nodeCount);
+
+    struct InstructionNode **prevs = (struct InstructionNode **)malloc(sizeof(struct InstructionNode *) * graph->n_ions);
+    for (int i = 0; i < graph->n_ions; i++) {
+        prevs[i] = NULL;
+    }
+
+    int count = 0;
+
+    rewind(fp);
+
+    printf("Parsing QASM file...\n");
+
+    while (fgets(line, sizeof(line), fp)) {
+        printf("\nParsing line: %s", line);
+
+        // skip empty lines
+        if (strlen(line) < 2) continue;
+
+        // skip declarations
+        if (strstr(line, "qubit") || strstr(line, "bit")) continue;
+
+        // tokenize
+        char *token = strtok(line, " ,;\n");
+        if (!token) continue;
+
+        enum OperationType op_type = get_operation_type(token);
+        if (op_type == 0) continue;
+
+        // parse targets
+        int targets[3]; // Assume 3 or less qubits in one gate
+        int n_targets = 0;
+
+        while ((token = strtok(NULL, " ,;\n"))) {
+            if (strstr(token, "qreg")) {
+                int idx = parse_qubit_index(token);
+                if (idx >= 0) {
+                    printf("Found target qubit index: %d\n", idx);
+                    targets[n_targets++] = idx + 1;
+                }
+            }
+        }
+
+        struct InstructionNode node;
+        if (n_targets > 0) {
+            struct InstructionNode prevNodes[n_targets];
+            int numPrevNodes = 0;
+            for (int i = 0; i < n_targets; i++) {
+                if (prevs[targets[i] - 1]) {
+                    prevNodes[i] = *prevs[targets[i] - 1];
+                    numPrevNodes++;
+                }
+            }
+
+            node.n_prev_nodes = numPrevNodes;
+            node.prev_nodes = prevNodes;
+
+            for (int i = 0; i < n_targets; i++) {
+                prevs[targets[i] - 1] = &node;
+            }
+        } else {
+            node.n_prev_nodes = 0;
+            node.prev_nodes = NULL;
+        }
+
+        node.operation_type = op_type;
+        node.graphindex = count + 1;
+        node.n_target_ions = n_targets;
+        node.target_ions = malloc(sizeof(int) * n_targets);
+        for (int i = 0; i < n_targets; i++) {
+            node.target_ions[i] = targets[i];
+        }
+
+        printf("Instruction %d: Operation Type: %d, Num Targets: %d, Targets: ",
+            node.graphindex,
+            node.operation_type,
+            node.n_target_ions
+        );
+
+        for (int t = 0; t < node.n_target_ions; t++) {
+            printf("%d ", node.target_ions[t]);
+        }
+        printf("\n");
+
+        for (int i = 0; i < n_targets; i++) {
+            node.target_ions[i] = targets[i];
+        }
+
+        graph->layer_idxs[count] = count + 1;
+        graph->instruction_nodes[count++] = node;
+    }
+
+    fclose(fp);
+
+    printf("\nFinished parsing QASM file.\n");
+
+    for (int i = 0; i < graph->n_instruction_nodes; i++) {
+        printf("Instruction %d: Operation Type: %d, Num Targets: %d, Targets: ",
+            i + 1,
+            graph->instruction_nodes[i].operation_type,
+            graph->instruction_nodes[i].n_target_ions
+        );
+
+        for (int t = 0; t < graph->instruction_nodes[i].n_target_ions; t++) {
+            printf("%d ", graph->instruction_nodes[i].target_ions[t]);
+        }
+        printf("\n");
+    }
+
+    printf("\nParsed QASM file: %d instruction nodes, number of qubits: %d\n\n", graph->n_instruction_nodes, graph->n_ions);
+
+    return graph;
+}
+
 struct TransportProgram* simple_transport_schedule()
 {
     struct ZoneNode L1 = { LOAD_ZONE, 5, 0};
@@ -219,16 +478,70 @@ struct TransportProgram* simple_transport_schedule()
 
     struct InstructionNode circuitInstructions[3] = { H, X, CX };
     int circuitLayers[3] = { 1, 1, 2 };
-    struct CircuitGraph circuitGraphObject = {3, circuitInstructions, circuitLayers};
+    struct CircuitGraph circuitGraphObject = {2, 3, circuitInstructions, circuitLayers};
     struct CircuitGraph *circuitGraph = &circuitGraphObject;
 
     struct TransportProgram *transportProgram = (struct TransportProgram*)malloc(sizeof(struct TransportProgram));
-    transportProgram->n_ions = 2;
     transportProgram = generate_transport_schedule(trapGraph, circuitGraph, transportProgram);
     if (transportProgram == NULL) {
         return NULL;
     }
     
+    print_transport_program(transportProgram);
+
+    return transportProgram;
+}
+
+struct TransportProgram* simple_transport_schedule_qasm_input()
+{
+    struct ZoneNode L1 = { LOAD_ZONE, 5, 0};
+    struct ZoneNode E1 = { EMPTY_ZONE, 3, 0};
+    struct ZoneNode S1 = { STORAGE_ZONE, 10, 0};
+    struct ZoneNode E2 = { EMPTY_ZONE, 3, 0};
+    struct ZoneNode G1 = { GATE_ZONE, 2, 0};
+    struct ZoneNode E3 = { EMPTY_ZONE, 3, 0};
+    struct ZoneNode M1 = { MEASURE_ZONE, 1, 0};
+
+    struct ZoneNode Edge1Zones[2] = { L1, E1 };
+    struct TransportEdge Edge1 = { LINEAR_SEGMENT, 2, Edge1Zones };
+    struct ZoneNode Edge2Zones[2] = { E1, S1 };
+    struct TransportEdge Edge2 = { LINEAR_SEGMENT, 2, Edge2Zones };
+    struct ZoneNode Edge3Zones[2] = { S1, E2 };
+    struct TransportEdge Edge3 = { LINEAR_SEGMENT, 2, Edge3Zones };
+    struct ZoneNode Edge4Zones[2] = { E2, G1 };
+    struct TransportEdge Edge4 = { LINEAR_SEGMENT, 2, Edge4Zones };
+    struct ZoneNode Edge5Zones[2] = { G1, E3 };
+    struct TransportEdge Edge5 = { LINEAR_SEGMENT, 2, Edge5Zones };
+    struct ZoneNode Edge6Zones[2] = { E3, M1 };
+    struct TransportEdge Edge6 = { LINEAR_SEGMENT, 2, Edge6Zones };
+
+    struct ZoneNode trapGraphZones[7] = { L1, E1, S1, E2, G1, E3, M1 };
+    struct TransportEdge trapGraphEdges[7] = { Edge1, Edge2, Edge3, Edge4, Edge5, Edge6 };
+    
+    struct TrapGraph trapGraphObject = { 7, 6, trapGraphZones, trapGraphEdges };
+    struct TrapGraph *trapGraph = &trapGraphObject;
+
+    struct CircuitGraph *circuitGraph = parse_qasm("tests/quantumcircuits/test_0000.qasm");
+
+    if (!circuitGraph) {
+        printf("ERROR: Failed to parse QASM file.\n");
+        return NULL;
+    }
+
+    struct TransportProgram *transportProgram = (struct TransportProgram*)malloc(sizeof(struct TransportProgram));
+    transportProgram = generate_transport_schedule(trapGraph, circuitGraph, transportProgram);
+
+    if (transportProgram == NULL) {
+        return NULL;
+    }
+    
+    print_transport_program(transportProgram);
+
+    return transportProgram;
+}
+
+void print_transport_program(struct TransportProgram *transportProgram)
+{
     printf("Number of ions: %d\n", transportProgram->n_ions);
     printf("Number of transports: %d\n", transportProgram->n_transports);
     
@@ -244,6 +557,4 @@ struct TransportProgram* simple_transport_schedule()
 
         printf("\n");
     }
-
-    return transportProgram;
 }
