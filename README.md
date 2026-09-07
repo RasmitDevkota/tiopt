@@ -45,12 +45,12 @@ tiopt is a C/Fortran-based program which simulates ion traps and ion transport, 
 4. Build shtools_wrapper
     - Enter the shtools_wrapper directory in the terminal
     - Open the file called "makefile" in shtools_wrapper using any code editor
-    - Change
+    - Remove the following lines of code
     ```
     SHTOOLS_SRC = /home/rasmitdevkota/projects/SHTOOLS/src
     SHTOOLS_LIB = /home/rasmitdevkota/projects/SHTOOLS
     ```
-    to
+    - Replace the removed lines of code with the following
     ```
     SHTOOLS_SRC = /usr/local/include
     SHTOOLS_LIB = /usr/local/lib
