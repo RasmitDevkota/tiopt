@@ -132,6 +132,7 @@ struct PulseProgram
 struct TransportWaveform
 {
 	int n_waveform_steps;
-	double (*voltages)[]; // stores a list of the voltages applied to each electrode at each timestep; implicity, length n_waveform_steps-by-n_electrodes
+	int n_electrodes;
+	double *voltages; // stores a list of the voltages applied to each electrode at each timestep; implicity, length n_waveform_steps-by-n_electrodes
 };
 

@@ -240,3 +240,342 @@ void expand_spherical_harmonics
 	}
 }
 
+static inline int vlm_index(
+    int l,
+    int m
+)
+{
+    return 2*(l*(LMAX+1)+m);
+}
+
+static double dPlm_dx(
+    int l,
+    int m,
+    double x
+)
+{
+    if (l == 0)
+        return 0.0;
+
+    double Plm = gsl_sf_legendre_sphPlm(l, m, x);
+    double Plm_prev = gsl_sf_legendre_sphPlm(l-1, m, x);
+
+    return (l*x*Plm - (l+m)*Plm_prev) / (x*x-1.0);
+}
+
+static double dPlm_dtheta(
+    int l,
+    int m,
+    double theta
+)
+{
+	// @TODO - does this need to be made more consistent?
+    const double h = 1E-6;
+
+    double c1 = cos(theta+h);
+	double c2 = cos(theta-h);
+
+    double P1 = gsl_sf_legendre_sphPlm(l, m, c1);
+    double P2 = gsl_sf_legendre_sphPlm(l, m, c2);
+
+    return (P1-P2)/(2*h);
+}
+
+static double d2Plm_dtheta2(
+    int l,
+    int m,
+    double theta
+)
+{
+	// @TODO - does this need to be made more consistent?
+    double h = 1E-6;
+
+    double p1 = gsl_sf_legendre_sphPlm(l,m,cos(theta+h));
+
+    double p0 = gsl_sf_legendre_sphPlm(l,m,cos(theta));
+
+    double pm1 = gsl_sf_legendre_sphPlm(l,m,cos(theta-h));
+
+    return (p1-2*p0+pm1) / (h*h);
+}
+
+void evaluate_electrode_potential(
+    struct Electrode *electrode,
+    double position[3],
+    double *phi
+)
+{
+	*phi=0.0;
+
+    for(int sx = 0; sx < NSPH_X; sx++)
+    for(int sy = 0; sy < NSPH_Y; sy++)
+    for(int sz = 0; sz < NSPH_Z; sz++)
+    {
+        double cx = sx*SPH_SPACING + SPH_R;
+        double cy = sy*SPH_SPACING + SPH_R;
+        double cz = sz*SPH_SPACING + SPH_Z_MIN + 1;
+
+        double dx = position[0] - cx;
+		double dy = position[1] - cy;
+        double dz = position[2] - cz;
+
+        double r = sqrt(dx*dx+dy*dy+dz*dz);
+
+        if (r > SPH_R || r == 0)
+            continue;
+
+        double theta = acos(dz/r);
+        double phi_angle = atan2(dy, dx);
+        double costheta = cos(theta);
+
+        double Y[gsl_sf_legendre_array_n(LMAX)];
+
+        gsl_sf_legendre_array_e(
+            GSL_SF_LEGENDRE_SPHARM,
+            LMAX,
+            costheta,
+            -1,
+            Y
+        );
+
+        int Vlm_len = electrode->Vlm_len;
+        double (*Vlm)[Vlm_len] = electrode->Vlm;
+
+        double (*Vlm_sphere)[(LMAX+1)*(LMAX+1)*2] = VLM_SLICE(&Vlm, sx, sy, sz);
+
+        for (int l = 0; l <= LMAX; l++)
+			for (int m = 0; m <= l; m++)
+            {
+                int idx = vlm_index(l,m);
+
+                double A = (*Vlm_sphere)[idx];
+                double B = (*Vlm_sphere)[idx+1];
+
+                double angular = A*cos(m*phi_angle) + B*sin(m*phi_angle);
+
+                *phi += pow(r,l) * Y[l*(l+1)/2+m] * angular;
+            }
+    }
+}
+
+void evaluate_electrode_gradient(
+    struct Electrode *electrode,
+    double position[3],
+    double grad_phi[3]
+)
+{
+    grad_phi[0] = 0;
+    grad_phi[1] = 0;
+    grad_phi[2] = 0;
+
+    for (int sx = 0; sx < NSPH_X; sx++)
+    for (int sy = 0; sy < NSPH_Y; sy++)
+    for (int sz = 0; sz < NSPH_Z; sz++)
+    {
+        double c[3]= { sx*SPH_SPACING+SPH_R, sy*SPH_SPACING+SPH_R, sz*SPH_SPACING+SPH_Z_MIN+1 };
+
+        double x = position[0] - c[0];
+        double y = position[1] - c[1];
+        double z = position[2] - c[2];
+
+        double r = sqrt(x*x+y*y+z*z);
+
+        if (r > SPH_R || r == 0)
+            continue;
+
+        double theta = acos(z/r);
+        double phi = atan2(y,x);
+
+        double st = sin(theta);
+        double ct = cos(theta);
+
+        double er[3]= { st*cos(phi), st*sin(phi), ct };
+        double et[3]= { ct*cos(phi), ct*sin(phi), -st };
+        double ep[3]= { -sin(phi), cos(phi), 0 };
+
+        double Y[gsl_sf_legendre_array_n(LMAX)];
+
+        gsl_sf_legendre_array_e(
+            GSL_SF_LEGENDRE_SPHARM,
+            LMAX,
+            ct,
+            -1,
+            Y
+        );
+
+        double (*Vlm)[electrode->Vlm_len] = electrode->Vlm;
+
+        double (*Vs)[(LMAX+1)*(LMAX+1)*2] = VLM_SLICE(&Vlm, sx, sy, sz);
+
+        for(int l=0;l<=LMAX;l++)
+            for(int m=0;m<=l;m++)
+            {
+                int idx = vlm_index(l,m);
+
+                double A = (*Vs)[idx];
+                double B = (*Vs)[idx+1];
+
+                double angular = A*cos(m*phi) + B*sin(m*phi);
+                double dangular = -A*m*sin(m*phi) + B*m*cos(m*phi);
+
+                double Plm = Y[l*(l+1)/2+m];
+                double dP = dPlm_dx(l, m, ct);
+
+                double dtheta = -st*dP;
+
+                double R = pow(r, l);
+                double dr = l*pow(r, l-1);
+
+                double radial = dr* Plm * angular;
+                double polar = R * dtheta * angular / r;
+
+                double azimuth = R* Plm * dangular / (r * st + 1E-30);
+
+                for (int k = 0; k < 3; k++)
+                    grad_phi[k] += radial*er[k] + polar*et[k] + azimuth*ep[k];
+            }
+    }
+}
+
+void evaluate_electrode_hessian_finite_differences(
+    struct Electrode *electrode,
+    double position[3],
+    double H[3][3]
+)
+{
+	// @TODO - factor this out
+    double h = 1E-5;
+
+    for (int i = 0; i < 3; i++)
+	for (int j = 0; j < 3; j++)
+		H[i][j] = 0;
+
+    for (int j = 0; j < 3; j++)
+    {
+        double p1[3] = { position[0], position[1], position[2] };
+        double p2[3] = { position[0], position[1], position[2] };
+
+        p1[j]+=h;
+        p2[j]-=h;
+
+        double g1[3];
+        double g2[3];
+
+        evaluate_electrode_gradient(electrode, p1, g1);
+        evaluate_electrode_gradient(electrode, p2, g2);
+
+        for (int i = 0; i < 3; i++)
+            H[i][j] = (g1[i]-g2[i]) / (2 * h);
+    }
+}
+
+void evaluate_electrode_hessian_analytical(
+    struct Electrode *electrode,
+    double position[3],
+    double H[3][3]
+)
+{
+    for (int i = 0; i < 3; i++)
+	for (int j = 0; j < 3; j++)
+		H[i][j] = 0.0;
+
+    for (int sx = 0; sx < NSPH_X; sx++)
+    for (int sy = 0; sy < NSPH_Y; sy++)
+    for (int sz = 0; sz < NSPH_Z; sz++)
+    {
+
+        double cx = sx*SPH_SPACING + SPH_R;
+        double cy = sy*SPH_SPACING + SPH_R;
+        double cz = sz*SPH_SPACING + SPH_Z_MIN + 1;
+
+        double x = position[0] - cx;
+        double y = position[1] - cy;
+        double z = position[2] - cz;
+
+        double r = sqrt(x*x+y*y+z*z);
+
+        if (r > SPH_R || r == 0)
+            continue;
+
+        double theta = acos(z/r);
+        double phi = atan2(y,x);
+
+        double st = sin(theta);
+        double ct = cos(theta);
+
+        double er[3]= { st*cos(phi), st*sin(phi), ct };
+        double et[3]= { ct*cos(phi), ct*sin(phi), -st };
+        double ep[3]= { -sin(phi), cos(phi), 0 };
+
+        double (*Vlm)[electrode->Vlm_len] = electrode->Vlm;
+        double (*Vs)[(LMAX+1)*(LMAX+1)*2] = VLM_SLICE(&Vlm, sx, sy, sz);
+
+        for (int l = 0; l <= LMAX; l++)
+			for (int m = 0; m <= l; m++)
+			{
+				int idx = 2*(l*(LMAX+1)+m);
+
+				double A = (*Vs)[idx];
+				double B = (*Vs)[idx+1];
+
+				double angular = A*cos(m*phi) + B*sin(m*phi);
+				double angular_phi = -A*m*sin(m*phi) + B*m*cos(m*phi);
+				double angular_phiphi = -m * m * angular;
+
+				double P = gsl_sf_legendre_sphPlm(l, m, ct);
+				double Ptheta = -st * dPlm_dx(l, m, ct);
+				double Pthetatheta = d2Plm_dtheta2(l, m, theta);
+
+				double R = pow(r, l);
+
+				double f_rr = l*(l-1) * pow(r, l-2) * P * angular;
+				double f_rtheta = l * pow(r, l-1) * Ptheta * angular;
+				double f_rphi = l * pow(r, l-1) * P * angular_phi;
+				double f_thetatheta = R * Pthetatheta * angular;
+				double f_thetaphi = R * Ptheta * angular_phi;
+				double f_phiphi = R * P * angular_phiphi;
+
+				double basis[3][3] =
+				{
+					{er[0], et[0], ep[0]},
+					{er[1], et[1], ep[1]},
+					{er[2], et[2], ep[2]}
+				};
+
+				double Hs[3][3] =
+				{
+					{
+						f_rr,
+						f_rtheta/r,
+						f_rphi/(r*st+1E-30)
+					},
+					{
+						f_rtheta/r,
+						f_thetatheta/(r*r),
+						f_thetaphi/(r*r*st+1E-30)
+					},
+					{
+						f_rphi/(r*st+1E-30),
+						f_thetaphi/(r*r*st+1E-30),
+						f_phiphi/(r*r*st*st+1E-30)
+					}
+				};
+
+				for(int i = 0; i < 3; i++)
+				for(int j = 0; j < 3; j++)
+					for(int a = 0; a < 3; a++)
+					for(int b = 0; b < 3; b++)
+					{
+						H[i][j]
+						+=
+						basis[i][a]
+						*
+						Hs[a][b]
+						*
+						basis[j][b];
+					}
+			}
+    }
+}
+
+
