@@ -17,3 +17,6 @@ sl_outputs/
 # Documentation
 docs/**
 
+# Python cache
+.ipynb_checkpoints/
+
