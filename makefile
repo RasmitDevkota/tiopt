@@ -5,6 +5,10 @@ SHTOOLS_LIB_DIR += /usr/local/lib
 MOD_DIR += /usr/local/include
 NLOPT_LIB_DIR = /usr/local/lib
 
+SRCDIR:= src
+BUILDDIR := build
+INCDIR:=include
+
 MATH_LIBS = -lm
 GSL_LIBS = -lopenblas -L$(GSL_LIB_DIR) -lgsl
 FFTW_LIBS = -L$(FFTW_LIB_DIR) -lfftw3
@@ -17,7 +21,7 @@ FC = gfortran
 CC = gcc
 CXX = g++
 
-CFLAGS = -O1 -Wall -fPIC -g
+CFLAGS = -O1 -Wall -fPIC -g -I$(INCDIR)
 CXXFLAGS = -O1 -Wall -fPIC -g
 
 # Source files (C)
@@ -29,26 +33,36 @@ C_OBJ = ti_utils.o experiments.o verlet.o electrodynamics.o io.o main.o transpor
 # Output binary
 OUTPUT = tiopt
 
+# every .c file in SRCDIR, minus unfinished files listed in EXCLUDE
+EXCLUDE  = $(SRCDIR)/analysis.c
+SRC      = $(filter-out $(EXCLUDE),$(wildcard $(SRCDIR)/*.c))
+OBJECTS  = $(patsubst $(SRCDIR)/%.c,$(BUILDDIR)/%.o,$(SRC))
+
 # Make target: all
 all: $(OUTPUT)
 
-# Link the final executable
-$(OUTPUT): $(C_OBJ)
-	$(CC) $(C_OBJ) $(SHTOOLS_LIBS) $(SHWRAPPER_LIBS) $(MATH_LIBS) $(GSL_LIBS) $(NLOPT_LIBS) -o $(OUTPUT)
+$(OUTPUT): $(OBJECTS)	#we want to make BIN, so we need all the OBJECTS
+	@echo "linking and producing the final application" 	#the @ at the start of line says that we don't see the command being executed, but it still is. not functionally impacted
+	@$(CC) $^ $(SHTOOLS_LIBS) $(SHWRAPPER_LIBS) $(GSL_LIBS) $(NLOPT_LIBS) $(MATH_LIBS) -o $@
 
-# Compile C code
-$(C_OBJ): $(C_SRC)
-	$(CC) -c $(C_SRC) $(CFLAGS) $(SHTOOLS_LIBS) $(SHWRAPPER_LIBS) $(MATH_LIBS) $(GSL_LIBS) $(NLOPT_LIBS)
+$(BUILDDIR)/%.o: $(SRCDIR)/%.c | $(BUILDDIR)
+	@echo "Compiling the $@ file"
+	@$(CC) $(CFLAGS) -c $< -o $@
 
-# Clean up build files
+$(BUILDDIR):
+	mkdir -p $(BUILDDIR)
+
+run: $(OUTPUT)
+	./tiopt
+
+#Clean up build files
 clean:
-	rm -f $(C_OBJ) $(OUTPUT)
+	rm -rf $(BUILDDIR) $(OUTPUT)
 
 # Deep clean build files and outputs
-deep-clean:
-	rm -f $(C_OBJ) $(OUTPUT)
-	rm meshes/*
+deep-clean: clean
+	rm -f meshes/*
 
-# Phony targets
-.PHONY: all clean
+# Phony target
+.PHONY: all clean deep-clean
 
