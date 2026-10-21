@@ -34,7 +34,7 @@ C_OBJ = ti_utils.o experiments.o verlet.o electrodynamics.o io.o main.o transpor
 OUTPUT = tiopt
 
 # every .c file in SRCDIR, minus unfinished files listed in EXCLUDE
-EXCLUDE  = $(SRCDIR)/analysis.c
+EXCLUDE  = $(SRCDIR)/analysis.c $(SRCDIR)/waveforms.c 
 SRC      = $(filter-out $(EXCLUDE),$(wildcard $(SRCDIR)/*.c))
 OBJECTS  = $(patsubst $(SRCDIR)/%.c,$(BUILDDIR)/%.o,$(SRC))
 
