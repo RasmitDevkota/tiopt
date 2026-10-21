@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <math.h>
 
+#include <gsl/gsl_sf_legendre.h>
+
 #include "defs.h"
 #include "data_structures.h"
 #include "ti_utils.h"
