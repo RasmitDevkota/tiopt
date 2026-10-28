@@ -5,64 +5,102 @@ SHTOOLS_LIB_DIR += /usr/local/lib
 MOD_DIR += /usr/local/include
 NLOPT_LIB_DIR = /usr/local/lib
 
-SRCDIR:= src
-BUILDDIR := build
-INCDIR:=include
-
 MATH_LIBS = -lm
 GSL_LIBS = -lopenblas -L$(GSL_LIB_DIR) -lgsl
-FFTW_LIBS = -L$(FFTW_LIB_DIR) -lfftw3
+FFTW_LIBS = -L$(FFTW_LIB_DIR) -lfftw3_threads -lfftw3
 SHTOOLS_LIBS = -L$(SHTOOLS_LIB_DIR) -lSHTOOLS
 SHWRAPPER_LIBS = -L$(SHTOOLS_LIB_DIR) -lwrapper
 NLOPT_LIBS = -L$(NLOPT_LIB_DIR) -lnlopt
+
+# Multithreading with OpenMP (part of GCC), which can be disabled with make OPENMP=0
+OPENMP ?= 1
+ifeq ($(OPENMP), 1)
+OPENMP_FLAGS = -fopenmp
+endif
+
+# OpenCL is loaded at runtime when a GPU is requested, which only needs the dynamic loader
+DL_LIBS = -ldl
+
+# Also search the dependency directories at runtime, so that libtiopt.so can be loaded from Python without LD_LIBRARY_PATH
+RPATH_FLAGS = -Wl,-rpath,$(SHTOOLS_LIB_DIR) -Wl,-rpath,$(NLOPT_LIB_DIR)
+
+LIBS = $(SHTOOLS_LIBS) $(SHWRAPPER_LIBS) $(FFTW_LIBS) $(MATH_LIBS) $(GSL_LIBS) $(NLOPT_LIBS) $(DL_LIBS) $(OPENMP_FLAGS) $(RPATH_FLAGS)
 
 # Compiler and flags
 FC = gfortran
 CC = gcc
 CXX = g++
 
-CFLAGS = -O1 -Wall -fPIC -g -I$(INCDIR)
-CXXFLAGS = -O1 -Wall -fPIC -g
+# Compile-time parameters from defs.h can be overridden, e.g. make DEFINES="-DNSPH_X=32" for a longer region of
+# spherical harmonics expansions (run make clean first so that everything is rebuilt)
+DEFINES ?=
+
+CFLAGS = -O3 -Wall -fPIC -g -fno-math-errno -fcx-limited-range $(OPENMP_FLAGS) $(DEFINES)
+CXXFLAGS = -O3 -Wall -fPIC -g $(OPENMP_FLAGS) $(DEFINES)
 
 # Source files (C)
-C_SRC = ti_utils.c experiments.c verlet.c electrodynamics.c io.c main.c transport.c
+LIB_SRC = ti_utils.c experiments.c verlet.c electrodynamics.c io.c transport.c waveforms.c analysis.c traps.c ions.c photonics.c quantum.c circuits.c codesign.c acceleration.c bindings.c ion_heating/ion_heating.c
+C_SRC = $(LIB_SRC) main.c
+
+# Header files (C)
+C_HDR = $(wildcard *.h) ion_heating/ion_heating.h
 
 # Object files
-C_OBJ = ti_utils.o experiments.o verlet.o electrodynamics.o io.o main.o transport.o
+LIB_OBJ = $(LIB_SRC:.c=.o)
+C_OBJ = $(LIB_OBJ) main.o
 
 # Output binary
 OUTPUT = tiopt
 
-# every .c file in SRCDIR, minus unfinished files listed in EXCLUDE
-EXCLUDE  = $(SRCDIR)/analysis.c $(SRCDIR)/waveforms.c 
-SRC      = $(filter-out $(EXCLUDE),$(wildcard $(SRCDIR)/*.c))
-OBJECTS  = $(patsubst $(SRCDIR)/%.c,$(BUILDDIR)/%.o,$(SRC))
+# Output shared library, used by the Python bindings, GUI and tests
+LIBRARY = libtiopt.so
 
 # Make target: all
-all: $(OUTPUT)
+all: $(OUTPUT) $(LIBRARY)
 
-$(OUTPUT): $(OBJECTS)	#we want to make BIN, so we need all the OBJECTS
-	@echo "linking and producing the final application" 	#the @ at the start of line says that we don't see the command being executed, but it still is. not functionally impacted
-	@$(CC) $^ $(SHTOOLS_LIBS) $(SHWRAPPER_LIBS) $(GSL_LIBS) $(NLOPT_LIBS) $(MATH_LIBS) -o $@
+# Link the final executable
+$(OUTPUT): $(C_OBJ)
+	$(CC) $(C_OBJ) $(LIBS) -o $(OUTPUT)
 
-$(BUILDDIR)/%.o: $(SRCDIR)/%.c | $(BUILDDIR)
-	@echo "Compiling the $@ file"
-	@$(CC) $(CFLAGS) -c $< -o $@
+# Link the shared library
+$(LIBRARY): $(LIB_OBJ)
+	$(CC) -shared $(LIB_OBJ) $(LIBS) -o $(LIBRARY)
 
-$(BUILDDIR):
-	mkdir -p $(BUILDDIR)
+# Compile C code
+%.o: %.c $(C_HDR)
+	$(CC) -c $< $(CFLAGS) -o $@
 
-run: $(OUTPUT)
-	./tiopt
+# Embed the OpenCL kernels in the library as a string
+kernels_cl.h: kernels.cl
+	echo "static const char kernels_cl[] = {" > kernels_cl.h
+	od -An -v -tx1 kernels.cl | sed 's/\([0-9a-f][0-9a-f]\)/0x\1,/g' >> kernels_cl.h
+	echo "0x00 };" >> kernels_cl.h
 
-#Clean up build files
+acceleration.o: kernels_cl.h
+
+# Run the C and Python test suites
+test: $(LIBRARY)
+	$(MAKE) -C tests test
+	PYTHONPATH=python python3 -m pytest tests
+
+# Time the main computations with different numbers of threads and devices
+benchmark: $(LIBRARY)
+	$(MAKE) -C tests benchmark
+
+# Launch the GUI
+gui: $(LIBRARY)
+	PYTHONPATH=python python3 -m tiopt
+
+# Clean up build files
 clean:
-	rm -rf $(BUILDDIR) $(OUTPUT)
+	rm -f $(C_OBJ) $(OUTPUT) $(LIBRARY) kernels_cl.h
+	$(MAKE) -C tests clean
 
 # Deep clean build files and outputs
-deep-clean: clean
-	rm -f meshes/*
+deep-clean:
+	rm -f $(C_OBJ) $(OUTPUT) $(LIBRARY) kernels_cl.h
+	$(MAKE) -C tests clean
+	rm meshes/*
 
-# Phony target
-.PHONY: all clean deep-clean
-
+# Phony targets
+.PHONY: all clean deep-clean test gui benchmark

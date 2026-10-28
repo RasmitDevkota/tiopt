@@ -6,6 +6,7 @@
 #include <ctype.h>
 
 #include "data_structures.h"
+#include "circuits.h"
 
 // Helper to find an available zone of a given type respecting capacity
 struct ZoneNode* select_available_zone
@@ -45,8 +46,11 @@ struct TransportProgram* generate_transport_schedule
     transportProgram->n_transports = circuitGraph->n_instruction_nodes;
     
     // Allocate space for transport program
-    transportProgram->transport_n_targets_list = (int *)malloc(sizeof(int) * transportProgram->n_transports);
-    transportProgram->transport_targets_list = (int **)malloc(sizeof(int*) * transportProgram->n_transports);
+    transportProgram->transport_n_targets_list = (int *)calloc(transportProgram->n_transports, sizeof(int));
+    transportProgram->transport_targets_list = (int **)calloc(transportProgram->n_transports, sizeof(int*));
+    transportProgram->arrival_times = (double *)calloc(transportProgram->n_transports, sizeof(double));
+    transportProgram->destinations = calloc(transportProgram->n_transports, sizeof(double[3]));
+    transportProgram->initial_positions = calloc(transportProgram->n_ions, sizeof(double[3]));
 
     // Keeps track of which zone ions are in
     struct ZoneNode **ion_states = malloc(transportProgram->n_ions * sizeof(struct ZoneNode*));
@@ -59,6 +63,7 @@ struct TransportProgram* generate_transport_schedule
             return NULL;
         }
         ion_states[i]->zone_occupancy++;
+        memcpy(transportProgram->initial_positions[i], ion_states[i]->position, sizeof(double[3]));
     }
 
     // Find how many layers in circuit (may be redundant)
@@ -116,6 +121,8 @@ struct TransportProgram* generate_transport_schedule
                 printf("ERROR: No available instruction zone for instruction %d.\n", instr->graphindex);
                 return NULL;
             }
+
+            memcpy(transportProgram->destinations[i], instructionZone->position, sizeof(double[3]));
 
             for (int i = 0; i < trapGraph->n_zones; i++) {
                 printf("Zone %d Occupancy: %d\n", i + 1, trapGraph->zone_nodes[i].zone_occupancy);
@@ -181,6 +188,8 @@ struct TransportProgram* generate_transport_schedule
         printf("\n");
     }
     printf("\n");
+
+    schedule_arrival_times(circuitGraph, transportProgram);
 
     free(ion_states);
     return transportProgram;
@@ -327,9 +336,9 @@ struct CircuitGraph* parse_qasm(const char *filename)
     graph->instruction_nodes = (struct InstructionNode *)malloc(sizeof(struct InstructionNode) * nodeCount);
     graph->layer_idxs = (int *)malloc(sizeof(int) * nodeCount);
 
-    struct InstructionNode **prevs = (struct InstructionNode **)malloc(sizeof(struct InstructionNode *) * graph->n_ions);
+    int *last_node_idxs = (int *)malloc(sizeof(int) * (graph->n_ions > 0 ? graph->n_ions : 1));
     for (int i = 0; i < graph->n_ions; i++) {
-        prevs[i] = NULL;
+        last_node_idxs[i] = -1;
     }
 
     int count = 0;
@@ -355,42 +364,20 @@ struct CircuitGraph* parse_qasm(const char *filename)
         if (op_type == 0) continue;
 
         // parse targets
-        int targets[3]; // Assume 3 or less qubits in one gate
+        int targets[graph->n_ions > 0 ? graph->n_ions : 1];
         int n_targets = 0;
 
         while ((token = strtok(NULL, " ,;\n"))) {
             if (strstr(token, "qreg")) {
-                int idx = parse_qubit_index(token);
-                if (idx >= 0) {
-                    printf("Found target qubit index: %d\n", idx);
-                    targets[n_targets++] = idx + 1;
-                }
+                n_targets = add_qasm_targets(token, graph->n_ions, targets, n_targets);
             }
         }
 
         struct InstructionNode node;
-        if (n_targets > 0) {
-            struct InstructionNode prevNodes[n_targets];
-            int numPrevNodes = 0;
-            for (int i = 0; i < n_targets; i++) {
-                if (prevs[targets[i] - 1]) {
-                    prevNodes[i] = *prevs[targets[i] - 1];
-                    numPrevNodes++;
-                }
-            }
-
-            node.n_prev_nodes = numPrevNodes;
-            node.prev_nodes = prevNodes;
-
-            for (int i = 0; i < n_targets; i++) {
-                prevs[targets[i] - 1] = &node;
-            }
-        } else {
-            node.n_prev_nodes = 0;
-            node.prev_nodes = NULL;
-        }
+        set_prev_nodes(graph, last_node_idxs, targets, n_targets, &node);
 
         node.operation_type = op_type;
+        node.operation_duration = 0.0;
         node.graphindex = count + 1;
         node.n_target_ions = n_targets;
         node.target_ions = malloc(sizeof(int) * n_targets);
@@ -413,11 +400,19 @@ struct CircuitGraph* parse_qasm(const char *filename)
             node.target_ions[i] = targets[i];
         }
 
-        graph->layer_idxs[count] = count + 1;
-        graph->instruction_nodes[count++] = node;
+        graph->instruction_nodes[count] = node;
+        for (int i = 0; i < n_targets; i++) {
+            last_node_idxs[targets[i] - 1] = count;
+        }
+        count++;
     }
 
     fclose(fp);
+    free(last_node_idxs);
+
+    // Only lines with recognized operations become instruction nodes
+    graph->n_instruction_nodes = count;
+    compute_circuit_layers(graph);
 
     printf("\nFinished parsing QASM file.\n");
 
@@ -558,3 +553,4 @@ void print_transport_program(struct TransportProgram *transportProgram)
         printf("\n");
     }
 }
+

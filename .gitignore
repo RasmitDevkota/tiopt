@@ -3,7 +3,14 @@ trap.data
 
 # tiopt output files
 *.o
-tiopt
+/tiopt
+/libtiopt.so
+/tests/tiopt-test
+/tests/tiopt-benchmark
+/examples/c/basic_trap
+/codesign.trap
+/examples/output/
+kernels_cl.h
 
 # GMSH output files
 meshes/
@@ -15,8 +22,11 @@ sl_outputs/
 *.pos
 
 # Documentation
-docs/**
+docs/html/
+docs/latex/
 
 # Python cache
 .ipynb_checkpoints/
+__pycache__/
+.pytest_cache/
 

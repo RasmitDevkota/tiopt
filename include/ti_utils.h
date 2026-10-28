@@ -1,3 +1,5 @@
+#pragma once
+
 #include "data_structures.h"
 
 void dot
@@ -6,6 +8,13 @@ void dot
 	double (*v1)[len],
 	double (*v2)[len],
 	double *v1_dot_v2
+);
+
+void cross
+(
+	double (*v1)[3],
+	double (*v2)[3],
+	double (*v1_cross_v2)[3]
 );
 
 void grad_1d
@@ -73,8 +82,22 @@ void compute_hessian_3d
 	double dz
 );
 
-int* find_step_times
+int diagonalize_matrix_3d
 (
-	struct PulseProgram
+	double (*A)[3][3],
+	double (*eigenvalues)[3],
+	double (*eigenvectors)[3][3]
 );
 
+double* find_event_times
+(
+	struct PulseProgram *pulse_program,
+	int *n_event_times
+);
+
+int* find_step_times
+(
+	struct PulseProgram *pulse_program,
+	const double dt,
+	int *n_step_times
+);

@@ -1,3 +1,5 @@
+#pragma once
+
 #include "data_structures.h"
 
 int generate_trap_from_file(
@@ -5,3 +7,8 @@ int generate_trap_from_file(
 	struct Trap *trap
 );
 
+int write_trap_to_file
+(
+	char *trap_filename,
+	struct Trap *trap
+);

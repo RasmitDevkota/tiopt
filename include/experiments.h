@@ -1,3 +1,7 @@
+#pragma once
+
+#include "data_structures.h"
+
 enum Experiment
 {
 	IDLE,
@@ -6,7 +10,8 @@ enum Experiment
 
 void run_experiment
 (
+	struct Trap *trap,
+	struct IonParameters *ion,
 	enum Experiment experiment,
 	double *cost
 );
-
