@@ -110,7 +110,8 @@ int ion_compute_psd(const double *e, const spectrum_opts_t *opt,
         return -1;
     }
 
-    double denom = Fs * (double)n * wsum2;
+    /* One-sided PSD of a windowed periodogram: 2 |X_k|^2 / (Fs sum(w^2)) */
+    double denom = Fs * wsum2;
     if (denom <= 0.0) denom = 1.0;
 
     for (int k = 0; k < nb; k++) {

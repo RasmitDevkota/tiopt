@@ -1,3 +1,5 @@
+#pragma once
+
 #include "data_structures.h"
 
 struct TransportProgram* generate_transport_schedule
@@ -8,6 +10,14 @@ struct TransportProgram* generate_transport_schedule
 );
 
 struct TransportProgram* simple_transport_schedule ();
+
+struct CircuitGraph* parse_qasm(const char *filename);
+
+struct ZoneNode* select_available_zone
+(
+    struct TrapGraph *trapGraph,
+    enum ZoneType type
+);
 
 struct TransportProgram* simple_transport_schedule_qasm_input();
 

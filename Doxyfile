@@ -54,7 +54,7 @@ PROJECT_NUMBER         =
 # for a project that appears at the top of each page and should give viewers a
 # quick idea about the purpose of the project. Keep the description short.
 
-PROJECT_BRIEF          =
+PROJECT_BRIEF          = "Simulation and optimization of ion traps, from integrated photonics to quantum dynamics"
 
 # With the PROJECT_LOGO tag one can specify a logo or an icon that is included
 # in the documentation. The maximum height of the logo should not exceed 55
@@ -357,7 +357,7 @@ TOC_INCLUDE_HEADINGS   = 6
 # The default value is: DOXYGEN.
 # This tag requires that the tag MARKDOWN_SUPPORT is set to YES.
 
-MARKDOWN_ID_STYLE      = DOXYGEN
+MARKDOWN_ID_STYLE      = GITHUB
 
 # When enabled Doxygen tries to link words that correspond to documented
 # classes, or namespaces to their corresponding documentation. Such a link can
@@ -366,7 +366,7 @@ MARKDOWN_ID_STYLE      = DOXYGEN
 # AUTOLINK_IGNORE_WORDS tag are excluded from automatic linking.
 # The default value is: YES.
 
-AUTOLINK_SUPPORT       = YES
+AUTOLINK_SUPPORT       = NO
 
 # This tag specifies a list of words that, when matching the start of a word in
 # the documentation, will suppress auto links generation, if it is enabled via
@@ -512,7 +512,7 @@ TIMESTAMP              = NO
 # normally produced when WARNINGS is set to YES.
 # The default value is: NO.
 
-EXTRACT_ALL            = NO
+EXTRACT_ALL            = YES
 
 # If the EXTRACT_PRIVATE tag is set to YES, all private members of a class will
 # be included in the documentation.
@@ -969,7 +969,9 @@ WARN_LOGFILE           =
 # spaces. See also FILE_PATTERNS and EXTENSION_MAPPING
 # Note: If this tag is empty the current directory is searched.
 
-INPUT                  =
+INPUT                  = . \
+                         python/tiopt/lib.py \
+                         examples/README.md
 
 # This tag can be used to specify the character encoding of the source files
 # that Doxygen parses. Internally Doxygen uses the UTF-8 encoding. Doxygen uses
@@ -1073,7 +1075,7 @@ RECURSIVE              = NO
 # Note that relative paths are relative to the directory from which Doxygen is
 # run.
 
-EXCLUDE                = ./meshs/
+EXCLUDE                = kernels_cl.h
 
 # The EXCLUDE_SYMLINKS tag can be used to select whether or not files or
 # directories that are symbolic links (a Unix file system feature) are excluded
@@ -1162,7 +1164,8 @@ INPUT_FILTER           =
 # need to set EXTENSION_MAPPING for the extension otherwise the files are not
 # properly processed by Doxygen.
 
-FILTER_PATTERNS        =
+FILTER_PATTERNS        = "*.c=python3 docs/doxygen_filter.py" \
+                         "*.h=python3 docs/doxygen_filter.py"
 
 # If the FILTER_SOURCE_FILES tag is set to YES, the input filter (if set using
 # INPUT_FILTER) will also be used to filter the input files that are used for
@@ -1184,7 +1187,7 @@ FILTER_SOURCE_PATTERNS =
 # (index.html). This can be useful if you have a project on for instance GitHub
 # and want to reuse the introduction page also for the Doxygen output.
 
-USE_MDFILE_AS_MAINPAGE =
+USE_MDFILE_AS_MAINPAGE = README.md
 
 # If the IMPLICIT_DIR_DOCS tag is set to YES, any README.md file found in sub-
 # directories of the project's root, is used as the documentation for that sub-
@@ -2190,7 +2193,7 @@ USE_PDFLATEX           = YES
 # The default value is: NO.
 # This tag requires that the tag GENERATE_LATEX is set to YES.
 
-LATEX_BATCHMODE        = NO
+LATEX_BATCHMODE        = YES
 
 # If the LATEX_HIDE_INDICES tag is set to YES then Doxygen will not include the
 # index chapters (such as File Index, Compound Index, etc.) in the output.

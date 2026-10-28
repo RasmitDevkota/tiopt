@@ -5,9 +5,9 @@ version: 2
 build:
   os: ubuntu-24.04
   commands:
+    # Doxygen writes to docs/, but ReadtheDocs only serves what is in $READTHEDOCS_OUTPUT
     - doxygen ./Doxyfile
-
-# Build documentation in additional formats
-formats:
-  - pdf
-
+    - mkdir -p $READTHEDOCS_OUTPUT
+    - cp -r ./docs/html $READTHEDOCS_OUTPUT/html
+    # Build the PDF from the LaTeX output too, but still deploy the HTML documentation if that fails
+    - make -C ./docs/latex && mkdir -p $READTHEDOCS_OUTPUT/pdf && cp ./docs/latex/refman.pdf $READTHEDOCS_OUTPUT/pdf/tiopt.pdf || echo "Failed to build the PDF documentation"
