@@ -9,5 +9,6 @@ build:
     - doxygen ./Doxyfile
     - mkdir -p $READTHEDOCS_OUTPUT
     - cp -r ./docs/html $READTHEDOCS_OUTPUT/html
-    # Build the PDF from the LaTeX output too, but still deploy the HTML documentation if that fails
-    - make -C ./docs/latex && mkdir -p $READTHEDOCS_OUTPUT/pdf && cp ./docs/latex/refman.pdf $READTHEDOCS_OUTPUT/pdf/tiopt.pdf || echo "Failed to build the PDF documentation"
+    # Build the PDF from the LaTeX output too, but still deploy the HTML documentation if that fails (LaTeX runs in
+    # batch mode, so its errors are printed from the log)
+    - make -C ./docs/latex && mkdir -p $READTHEDOCS_OUTPUT/pdf && cp ./docs/latex/refman.pdf $READTHEDOCS_OUTPUT/pdf/tiopt.pdf || (grep -A 2 '^!' ./docs/latex/refman.log | head -20; echo "Failed to build the PDF documentation")
