@@ -240,6 +240,20 @@ int find_potential_minimum
 	int max_iterations
 );
 
+int required_nsph_x
+(
+	double x_min,
+	double x_max
+);
+
+int find_rf_null_across
+(
+	struct Trap *trap,
+	double (*position)[3],
+	double direction[3],
+	int max_iterations
+);
+
 int find_rf_null
 (
 	struct Trap *trap,

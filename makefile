@@ -39,7 +39,7 @@ CFLAGS = -O3 -Wall -fPIC -g -fno-math-errno -fcx-limited-range $(OPENMP_FLAGS) $
 CXXFLAGS = -O3 -Wall -fPIC -g $(OPENMP_FLAGS) $(DEFINES)
 
 # Source files (C)
-LIB_SRC = ti_utils.c experiments.c verlet.c electrodynamics.c io.c transport.c waveforms.c analysis.c traps.c ions.c photonics.c quantum.c circuits.c codesign.c acceleration.c bindings.c ion_heating/ion_heating.c
+LIB_SRC = ti_utils.c experiments.c verlet.c electrodynamics.c io.c transport.c waveforms.c analysis.c traps.c ions.c photonics.c quantum.c circuits.c codesign.c zones.c acceleration.c bindings.c ion_heating/ion_heating.c
 C_SRC = $(LIB_SRC) main.c
 
 # Header files (C)

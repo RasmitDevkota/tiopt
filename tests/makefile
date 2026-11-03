@@ -25,7 +25,7 @@ CFLAGS = -O1 -Wall -fPIC -g
 CXXFLAGS = -O1 -Wall -fPIC -g
 
 # Source files (C)
-C_SRC = test_utils.c test_ti_utils.c test_electrodynamics.c test_io.c test_verlet.c test_waveforms.c test_photonics.c test_quantum.c test_transport.c test_analysis.c test_acceleration.c test_codesign.c main.c
+C_SRC = test_utils.c test_ti_utils.c test_electrodynamics.c test_io.c test_verlet.c test_waveforms.c test_photonics.c test_quantum.c test_transport.c test_analysis.c test_acceleration.c test_codesign.c test_zones.c main.c
 
 # Header files (C)
 C_HDR = $(wildcard *.h) $(wildcard $(TIOPT_DIR)/*.h)

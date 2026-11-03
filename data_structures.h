@@ -77,6 +77,18 @@ struct Lasers
 };
 
 // Integrated photonics data
+// Beams of the integrated photonics, by the transition they drive (see get_photonics_beam for each species)
+enum PhotonicsBeam
+{
+	QUBIT_BEAM, // qubit transition (e.g. 729 nm S1/2-D5/2 in 40Ca+), at gate zones
+	DETECTION_BEAM, // S1/2-P1/2 cooling and detection transition (e.g. 397 nm), at measurement, cooling and loading zones
+	REPUMP_BEAM, // D3/2 repumper (e.g. 866 nm), wherever there is a detection beam
+	QUENCH_BEAM, // D5/2 quench for qubit reset (e.g. 854 nm), at gate zones
+	PHOTOIONIZATION_BEAM, // first step of photoionizing the neutral atom (e.g. 423 nm), at loading zones
+	IONIZATION_BEAM, // second step of photoionization, into the continuum (e.g. 375 nm), at loading zones
+	N_PHOTONICS_BEAMS,
+};
+
 struct Waveguide
 {
 	double wavelength; // free-space wavelength of the guided light (µm)
@@ -100,6 +112,8 @@ struct GratingCoupler
 	double focal_distance; // distance along the beam from the surface to the focus, or 0 for an unfocused grating (µm)
 	double power; // optical power delivered to the grating (W)
 	double efficiency; // fraction of the delivered power which is emitted towards the ion
+	int beam; // beam of enum PhotonicsBeam which the grating delivers, or -1 for any other light
+	int zone; // zone of the trap which the grating addresses, or -1 if it addresses none of them
 };
 
 // Integrated single-photon detector (e.g. a superconducting nanowire or avalanche photodiode) in the trap surface
@@ -111,6 +125,7 @@ struct Detector
 	double wavelength; // free-space wavelength of the detected light (µm)
 	double quantum_efficiency; // probability that a photon reaching the active area is counted
 	double dark_count_rate; // rate of counts with no light (1/s)
+	int zone; // zone of the trap beneath which the detector lies, or -1 if it lies beneath none of them
 };
 
 struct Trap
@@ -127,6 +142,8 @@ struct Trap
 	struct GratingCoupler (*grating_couplers)[]; // implicitly, length n_grating_couplers
 	int n_detectors;
 	struct Detector (*detectors)[]; // implicitly, length n_detectors
+	int n_zones;
+	struct ZoneNode (*zones)[]; // zones where ions are loaded, stored, gated, measured, etc.; implicitly, length n_zones
 };
 
 // Abstract quantum circuit data

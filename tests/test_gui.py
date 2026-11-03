@@ -196,4 +196,82 @@ def test_codesign_tab(app, repository):
     assert len(tab.plot.figure.axes) == 4
     tab.use_trap()
     app.update()
-    assert len(app.trap.grating_couplers()) == 4
+    # The loading zone gets photoionization and cooling beams, the gate zone the qubit and quench beams, and the
+    # measurement zone the detection and repump beams
+    assert [zone.types for zone in app.trap.zones()] == ["load+storage", "empty", "gate", "empty", "measure"]
+    assert len(app.trap.grating_couplers()) == 8 and len(app.trap.detectors()) == 1
+
+
+def test_codesign_tab_layout(app, repository):
+    tab = app.tabs["codesign"]
+    tab.qasm_var.set(str(repository / "examples" / "circuits" / "bell.qasm"))
+    tab.circuit.set("layout", "load+storage, gate+measure")
+    tab.basic_design()
+    app.update()
+    assert tab.codesign.zone_layout == "load+storage, gate+measure"
+    tab.circuit.set("layout", tab.circuit.get_str("layout").replace("gate+measure", "gate, measure"))
+
+
+@pytest.mark.parametrize("preset", ["Linear from zone layout", "X junction", "Y junction", "T junction", "Point trap"])
+def test_trap_tab_presets(app, preset):
+    tab = app.tabs["trap"]
+    tab.preset.set("preset", preset)
+    tab.preset.set("n_segments", "2")
+    tab.preset.set("segment_width", "40")
+    tab.preset.set("layout", "load, gate x2, measure")
+    tab.preset.set("photonics", True)
+    tab.generate_preset()
+    app.update()
+    assert app.trap is not None and app.trap.solved
+    assert len(tab.zone_tree.get_children()) == len(app.trap.zones()) > 0
+    tab.design_report()
+    app.update()
+    assert "Zone 0" in text_of(tab.report)
+    tab.preset.set("preset", "Linear")
+    tab.preset.set("n_segments", "7")
+    tab.preset.set("segment_width", "50")
+    tab.preset.set("photonics", False)
+
+
+def test_trap_tab_layout_files(app, tmp_path, monkeypatch):
+    tab = app.tabs["trap"]
+    tab.preset.set("preset", "Linear from zone layout")
+    tab.preset.set("layout", "load, gate, measure")
+    tab.preset.set("photonics", True)
+    tab.generate_preset()
+    app.update()
+    gds = tmp_path / "trap.gds"
+    svg = tmp_path / "trap.svg"
+    monkeypatch.setattr("tkinter.filedialog.asksaveasfilename", lambda **kwargs: str(gds if kwargs.get("defaultextension") == ".gds" else svg))
+    tab.export_gds()
+    tab.export_svg()
+    assert gds.stat().st_size > 0 and svg.read_text().startswith("<svg")
+    n_electrodes = app.trap.n_electrodes
+    monkeypatch.setattr("tkinter.filedialog.askopenfilename", lambda **kwargs: str(gds))
+    tab.import_gds()
+    app.update()
+    assert app.trap.n_electrodes == n_electrodes
+    assert [zone.types for zone in app.trap.zones()] == ["load", "gate", "measure"]
+    tab.preset.set("preset", "Linear")
+    tab.preset.set("photonics", False)
+    tab.generate_preset()
+    app.update()
+
+
+def test_scheduling_tab_trap_zones(app):
+    tab = app.tabs["scheduling"]
+    trap_tab = app.tabs["trap"]
+    trap_tab.preset.set("preset", "Linear from zone layout")
+    trap_tab.preset.set("layout", "load+storage, gate, gate, measure")
+    trap_tab.preset.set("zone_spacing", "80")
+    trap_tab.generate_preset()
+    app.update()
+    tab.zones.set("trap_zones", True)
+    tab.schedule()
+    app.update()
+    assert "gate zone" in text_of(tab.results)
+    tab.zones.set("trap_zones", False)
+    trap_tab.preset.set("preset", "Linear")
+    trap_tab.preset.set("zone_spacing", "100")
+    trap_tab.generate_preset()
+    app.update()

@@ -70,7 +70,7 @@ int main
 	free_trap(&trap);
 
 	// Co-design for a Bell pair: a pass with each stage's own objective, then a QC-aware pass
-	struct Codesign *codesign = create_codesign("40Ca+", "../circuits/bell.qasm", NULL, NULL);
+	struct Codesign *codesign = create_codesign("40Ca+", "../circuits/bell.qasm", NULL, NULL, NULL);
 	if (codesign == NULL)
 		return 1;
 

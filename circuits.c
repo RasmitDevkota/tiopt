@@ -293,3 +293,85 @@ void free_transport_program
 	free(transport_program->initial_positions);
 	free(transport_program);
 }
+
+// Find the zone of a trap graph with any of the given types which has room for the target ions of an operation and
+// lies nearest to them (counting targets already in a zone as making room in it), or NULL if there is none; ion_states
+// holds the zone of each ion, and targets start at 1
+struct ZoneNode* select_operation_zone
+(
+	struct TrapGraph *trap_graph,
+	enum ZoneType zone_type,
+	struct ZoneNode **ion_states,
+	int *targets,
+	int n_targets
+)
+{
+	// Centroid of the target ions
+	double centroid[3] = { 0.0, 0.0, 0.0 };
+	for (int t = 0; t < n_targets; t++)
+		for (int k = 0; k < 3; k++)
+			centroid[k] += ion_states[targets[t] - 1]->position[k] / n_targets;
+
+	struct ZoneNode *nearest = NULL;
+	double nearest_distance = HUGE_VAL;
+	for (int z = 0; z < trap_graph->n_zones; z++)
+	{
+		struct ZoneNode *zone = &trap_graph->zone_nodes[z];
+
+		if (!(zone->zone_type & zone_type))
+			continue;
+
+		int n_present = 0;
+		for (int t = 0; t < n_targets; t++)
+			n_present += (ion_states[targets[t] - 1] == zone);
+
+		if (zone->zone_occupancy - n_present + n_targets > zone->zone_capacity)
+			continue;
+
+		double distance = sqrt(pow(zone->position[0] - centroid[0], 2) + pow(zone->position[1] - centroid[1], 2) + pow(zone->position[2] - centroid[2], 2));
+
+		if (distance < nearest_distance)
+		{
+			nearest = zone;
+			nearest_distance = distance;
+		}
+	}
+
+	return nearest;
+}
+
+// Move every ion which waits in a zone where operations happen (a gate, measurement or cooling zone which is not also
+// a storage zone) into the nearest storage zone with room, or else the nearest loading or empty zone with room, as
+// after a layer of a circuit; ions with nowhere to go stay where they are. ion_states holds the zone of each ion and is
+// updated
+void release_operation_zones
+(
+	struct TrapGraph *trap_graph,
+	struct ZoneNode **ion_states,
+	int n_ions
+)
+{
+	enum ZoneType destinations[3] = { STORAGE_ZONE, LOAD_ZONE, EMPTY_ZONE };
+
+	for (int i = 0; i < n_ions; i++)
+	{
+		struct ZoneNode *zone = ion_states[i];
+
+		if (!(zone->zone_type & (GATE_ZONE | MEASURE_ZONE | COOL_ZONE)) || (zone->zone_type & STORAGE_ZONE))
+			continue;
+
+		int target = i + 1;
+		for (int d = 0; d < 3; d++)
+		{
+			struct ZoneNode *destination = select_operation_zone(trap_graph, destinations[d], ion_states, &target, 1);
+
+			if (destination != NULL && destination != zone)
+			{
+				zone->zone_occupancy--;
+				destination->zone_occupancy++;
+				ion_states[i] = destination;
+				break;
+			}
+		}
+	}
+}

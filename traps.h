@@ -7,16 +7,10 @@ enum TrapPreset
 	LINEAR_SURFACE_TRAP,
 	LINEAR_SURFACE_TRAP_WITH_GRATINGS,
 	LINEAR_SURFACE_TRAP_WITH_PHOTONICS,
-};
-
-// Grating couplers added by add_trap_photonics, by the 40Ca+ transition they drive
-enum PhotonicsBeam
-{
-	QUBIT_BEAM, // 729 nm S1/2-D5/2 qubit transition, at the gate zone
-	DETECTION_BEAM, // 397 nm S1/2-P1/2 cooling and detection transition, at the measurement zone
-	REPUMP_BEAM, // 866 nm D3/2-P1/2 repumper, at the measurement zone
-	QUENCH_BEAM, // 854 nm D5/2-P3/2 quench for qubit reset, at the gate zone
-	N_PHOTONICS_BEAMS,
+	X_JUNCTION_TRAP, // four arms at right angles
+	Y_JUNCTION_TRAP, // three arms 120 degrees apart
+	T_JUNCTION_TRAP, // a straight trap with a third arm at right angles
+	POINT_TRAP, // a ring of RF which holds one ion above its center
 };
 
 void allocate_trap
@@ -35,6 +29,12 @@ void allocate_detectors
 (
 	struct Trap *trap,
 	int n_detectors
+);
+
+int add_zone_photonics
+(
+	struct Trap *trap,
+	const char *element
 );
 
 int add_trap_photonics
@@ -63,11 +63,31 @@ void set_rectangular_electrode
 	double y_max
 );
 
+int generate_junction_trap
+(
+	int n_arms,
+	double *arm_angles,
+	int n_segments,
+	double segment_width,
+	struct Trap *trap
+);
+
 int generate_trap_from_preset
 (
 	enum TrapPreset trap_preset,
 	int n_segments,
 	double segment_width,
+	struct Trap *trap
+);
+
+int generate_trap_from_layout
+(
+	const char *layout,
+	int n_ions,
+	double zone_spacing,
+	double segment_width,
+	const char *element,
+	int photonics,
 	struct Trap *trap
 );
 

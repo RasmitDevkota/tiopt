@@ -44,7 +44,7 @@ struct CodesignParameters
 // Hardware and noise which the co-design takes as given
 struct CodesignEnvironment
 {
-	int n_segments; // number of segmented DC electrodes on each side of the trap
+	int n_segments; // smallest number of segmented DC electrodes on each side of the trap (more are added to reach every zone)
 	double max_voltage; // largest DC voltage the electronics can apply (V)
 	double qubit_power; // power delivered to the qubit grating coupler (W)
 	double detection_power; // power delivered to the detection grating coupler (W)
@@ -120,15 +120,23 @@ struct Codesign
 	int *layer_single_qubit_gates; // implicitly, length n_layers
 	int *layer_two_qubit_gates; // implicitly, length n_layers
 	int *layer_measurements; // implicitly, length n_layers
+	int *layer_gate_zones; // number of gate zones which the gates of each layer run in at once; implicitly, length n_layers
+	int *layer_measure_zones; // number of measurement zones which the measurements of each layer run in at once; implicitly, length n_layers
+
+	// Zones of the trap, spaced evenly along its axis
+	char *layout; // zone layout (see parse_zone_layout)
 	int n_zones;
-	int gate_zone;
-	int measure_zone;
+	enum ZoneType *zone_types; // implicitly, length n_zones
+	int *zone_capacities; // implicitly, length n_zones
+	int gate_zone; // first gate zone
+	int measure_zone; // first measurement zone, or -1 if there is none
 	int n_static_wells; // largest number of zones occupied at once
-	int static_well_zones[8]; // zones occupied at once by the most wells; implicitly, length n_static_wells
+	int *static_well_zones; // zones occupied at once by the most wells; implicitly, length n_zones (of which n_static_wells are used)
 
 	// Trap, and results which depend on only some of the parameters, kept between evaluations of the design
 	struct Trap trap;
 	double solved_segment_width; // segment width of the trap whose electrodynamics are solved, or 0 if none is
+	int solved_n_segments; // number of segments on each side of the trap whose electrodynamics are solved
 	double gate_position[3]; // RF null at the gate zone (µm)
 	double measure_position[3]; // RF null at the measurement zone (µm)
 	double primitive_key[7]; // parameters the shuttle primitive was simulated with
@@ -158,6 +166,7 @@ struct Codesign* create_codesign
 (
 	char *element,
 	char *qasm_filename,
+	char *layout,
 	struct CodesignEnvironment *environment,
 	struct CodesignParameters *parameters
 );

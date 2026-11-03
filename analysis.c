@@ -189,3 +189,133 @@ double compute_trap_depth
 
 	return (U_barrier - U_null) / E_CHARGE;
 }
+
+// Follow the RF null along a path through waypoints (e.g. from one arm of a junction through its center and out along
+// another), finding the minimum of the pseudopotential in the plane across the path at n_samples points spaced evenly
+// along it; the points (µm) and the pseudopotential there (eV) are returned in positions and energies (each of length
+// n_samples, or NULL, with NAN where no minimum is found), and the height of the highest barrier along the path above
+// the lower of its two ends (eV) is returned. The trap's electrodynamics must be solved, and the path must lie within
+// the spherical harmonics expansions
+double compute_rf_null_path
+(
+	struct Trap *trap,
+	const double m,
+	const double q,
+	int n_waypoints,
+	double (*waypoints)[3],
+	int n_samples,
+	double (*positions)[3],
+	double *energies
+)
+{
+	if (n_waypoints < 2 || n_samples < 2)
+		return 0.0;
+
+	// Distance along the path to each waypoint
+	double *distances = malloc(n_waypoints * sizeof(double));
+	distances[0] = 0.0;
+	for (int w = 1; w < n_waypoints; w++)
+	{
+		double d_squared = 0.0;
+		for (int k = 0; k < 3; k++)
+			d_squared += pow(waypoints[w][k] - waypoints[w - 1][k], 2);
+
+		distances[w] = distances[w - 1] + sqrt(d_squared);
+	}
+
+	double (*points)[3] = malloc(n_samples * sizeof(double[3]));
+	int *found = calloc(n_samples, sizeof(int));
+
+	// Walk along the path from its start and then back from its end, starting the search at each point from the
+	// height of the null at the previous point (which follows the null as it rises or falls near a junction) or else
+	// from the height of the path, so that every point can be reached from whichever side leads to it
+	for (int pass = 0; pass < 2; pass++)
+	{
+		int has_height = 0;
+		double height = 0.0;
+
+		for (int j = 0; j < n_samples; j++)
+		{
+			int i = (pass == 0) ? j : n_samples - 1 - j;
+
+			if (found[i])
+			{
+				height = points[i][2];
+				has_height = 1;
+				continue;
+			}
+
+			double s = distances[n_waypoints - 1] * i / (n_samples - 1);
+
+			int leg = 0;
+			while (leg < n_waypoints - 2 && s > distances[leg + 1])
+				leg++;
+
+			double leg_length = distances[leg + 1] - distances[leg];
+			double fraction = (leg_length > 0.0) ? (s - distances[leg]) / leg_length : 0.0;
+
+			double point[3];
+			double direction[3];
+			for (int k = 0; k < 3; k++)
+			{
+				point[k] = waypoints[leg][k] + fraction * (waypoints[leg + 1][k] - waypoints[leg][k]);
+				direction[k] = waypoints[leg + 1][k] - waypoints[leg][k];
+			}
+
+			double path_height = point[2];
+			if (has_height)
+				point[2] = height;
+
+			int status = find_rf_null_across(trap, &point, direction, 200);
+			if (status != 0 && has_height)
+			{
+				for (int k = 0; k < 3; k++)
+					point[k] = waypoints[leg][k] + fraction * (waypoints[leg + 1][k] - waypoints[leg][k]);
+
+				point[2] = path_height;
+				status = find_rf_null_across(trap, &point, direction, 200);
+			}
+
+			if (status == 0)
+			{
+				for (int k = 0; k < 3; k++)
+					points[i][k] = point[k];
+
+				found[i] = 1;
+				height = point[2];
+				has_height = 1;
+			}
+		}
+	}
+
+	// Points where the null cannot be found are left out
+	double U_first = NAN;
+	double U_last = NAN;
+	double U_highest = -HUGE_VAL;
+	for (int i = 0; i < n_samples; i++)
+	{
+		double U = NAN;
+		if (found[i])
+		{
+			evaluate_pseudopotential(trap, m, q, points[i], &U, NULL, NULL);
+			U /= E_CHARGE;
+
+			U_first = isnan(U_first) ? U : U_first;
+			U_last = U;
+			U_highest = MAX(U_highest, U);
+		}
+
+		if (positions != NULL)
+			for (int k = 0; k < 3; k++)
+				positions[i][k] = found[i] ? points[i][k] : NAN;
+
+		if (energies != NULL)
+			energies[i] = U;
+	}
+
+	free(found);
+	free(points);
+	free(distances);
+
+	return isnan(U_first) ? NAN : U_highest - MIN(U_first, U_last);
+}

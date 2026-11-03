@@ -463,17 +463,29 @@ int test_trap_photonics
 	int status = generate_trap_from_preset(LINEAR_SURFACE_TRAP_WITH_PHOTONICS, 7, 50.0, &trap);
 
 	int result = check_error("trap preset with photonics designs every grating", status, 0.0);
-	result += check_error("trap preset with photonics has every beam", abs(trap.n_grating_couplers - N_PHOTONICS_BEAMS) + abs(trap.n_detectors - 1), 0.0);
+
+	// The qubit and quench beams address the gate zone, and the detection and repump beams the measurement zone, in
+	// the order of enum PhotonicsBeam
+	int expected_beams[4] = { QUBIT_BEAM, DETECTION_BEAM, REPUMP_BEAM, QUENCH_BEAM };
+	int expected_zones[4] = { 0, 1, 1, 0 };
+
+	int n_wrong = abs(trap.n_grating_couplers - 4) + abs(trap.n_detectors - 1) + abs(trap.n_zones - 2);
+	for (int g = 0; g < MIN(trap.n_grating_couplers, 4); g++)
+		n_wrong += ((*trap.grating_couplers)[g].beam != expected_beams[g]) + ((*trap.grating_couplers)[g].zone != expected_zones[g]);
+
+	if (trap.n_detectors > 0)
+		n_wrong += ((*trap.detectors)[0].zone != 1);
+
+	result += check_error("trap preset with photonics has every beam", n_wrong, 0.0);
 
 	// Every beam is focused on the zone it addresses, so its intensity peaks there
 	double gate_position[3] = { 0.0, 0.0, ION_HEIGHT };
 	double measure_position[3] = { 100.0, 0.0, ION_HEIGHT };
-	int at_gate_zone[N_PHOTONICS_BEAMS] = { 1, 0, 0, 1 };
 
 	double error = 0.0;
 	for (int b = 0; b < trap.n_grating_couplers; b++)
 	{
-		double *target = at_gate_zone[b] ? gate_position : measure_position;
+		double *target = ((*trap.grating_couplers)[b].zone == 0) ? gate_position : measure_position;
 
 		double intensity;
 		evaluate_grating_beam(&(*trap.grating_couplers)[b], target, &intensity, NULL);

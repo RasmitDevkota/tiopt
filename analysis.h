@@ -60,3 +60,15 @@ double compute_trap_depth
 	const double q,
 	double rf_null[3]
 );
+
+double compute_rf_null_path
+(
+	struct Trap *trap,
+	const double m,
+	const double q,
+	int n_waypoints,
+	double (*waypoints)[3],
+	int n_samples,
+	double (*positions)[3],
+	double *energies
+);

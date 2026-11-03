@@ -55,3 +55,19 @@ void free_transport_program
 (
 	struct TransportProgram *transport_program
 );
+
+struct ZoneNode* select_operation_zone
+(
+	struct TrapGraph *trap_graph,
+	enum ZoneType zone_type,
+	struct ZoneNode **ion_states,
+	int *targets,
+	int n_targets
+);
+
+void release_operation_zones
+(
+	struct TrapGraph *trap_graph,
+	struct ZoneNode **ion_states,
+	int n_ions
+);

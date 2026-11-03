@@ -86,6 +86,10 @@ double tiopt_constant
 		return SPH_CENTER_Y(0);
 	if (strcmp(name, "SPH_CENTER_Z_MIN") == 0)
 		return SPH_CENTER_Z(0);
+	if (strcmp(name, "SPH_CENTER_X_MAX") == 0)
+		return SPH_CENTER_X(NSPH_X - 1);
+	if (strcmp(name, "SPH_CENTER_Y_MAX") == 0)
+		return SPH_CENTER_Y(NSPH_Y - 1);
 	if (strcmp(name, "LMAX") == 0)
 		return LMAX;
 	if (strcmp(name, "RELAXATION_NX") == 0)
@@ -340,4 +344,13 @@ void get_codesign_layout
 	*n_zones = codesign->n_zones;
 	*n_layers = codesign->n_layers;
 	*n_ions = codesign->n_ions;
+}
+
+// Zone layout of a co-design (see parse_zone_layout)
+const char* get_codesign_zone_layout
+(
+	struct Codesign *codesign
+)
+{
+	return codesign->layout;
 }

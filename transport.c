@@ -96,24 +96,22 @@ struct TransportProgram* generate_transport_schedule
             transportProgram->transport_n_targets_list[i] = instr->n_target_ions;
             transportProgram->transport_targets_list[i] = (int *)malloc(sizeof(int) * transportProgram->transport_n_targets_list[i]);
             
-            // Find instruction zone for each instruction
+            // Find instruction zone for each instruction: the nearest one with room for its ions, moving ions out of
+            // the zones used earlier in the layer if every zone is full
+            enum ZoneType instructionType = 0;
             if (instr->operation_type & QUBIT) {
-                instructionZone = select_available_zone(trapGraph, GATE_ZONE);
-                if (!instructionZone) {
-                    printf("ERROR: No available gate zone for instruction %d.\n", instr->graphindex);
-                    return NULL;
-                }
+                instructionType = GATE_ZONE;
             } else if (instr->operation_type & COOL) {
-                instructionZone = select_available_zone(trapGraph, COOL_ZONE);
-                if (!instructionZone) {
-                    printf("ERROR: No available cool zone for instruction %d.\n", instr->graphindex);
-                    return NULL;
-                }
+                instructionType = COOL_ZONE;
             } else if (instr->operation_type & DETECT) {
-                instructionZone = select_available_zone(trapGraph, MEASURE_ZONE);
+                instructionType = MEASURE_ZONE;
+            }
+
+            if (instructionType) {
+                instructionZone = select_operation_zone(trapGraph, instructionType, ion_states, instr->target_ions, instr->n_target_ions);
                 if (!instructionZone) {
-                    printf("ERROR: No available measure zone for instruction %d.\n", instr->graphindex);
-                    return NULL;
+                    release_operation_zones(trapGraph, ion_states, transportProgram->n_ions);
+                    instructionZone = select_operation_zone(trapGraph, instructionType, ion_states, instr->target_ions, instr->n_target_ions);
                 }
             }
 
@@ -150,34 +148,16 @@ struct TransportProgram* generate_transport_schedule
                 printf("\n");
             }
 
-            // Move ions to storage/empty zones
-            for (int t = 0; t < instr->n_target_ions; t++) {
-                int ion_id = instr->target_ions[t];
+        }
 
-                struct ZoneNode *dest = select_available_zone(trapGraph, STORAGE_ZONE | EMPTY_ZONE);
-                if (!dest) {
-                    printf("ERROR: No available storage/empty zone after instruction %d.\n", instr->graphindex);
-                    continue;
-                }
+        // Move ions to storage/empty zones once the layer is done, so that the operations of a layer can use several
+        // instruction zones at once
+        release_operation_zones(trapGraph, ion_states, transportProgram->n_ions);
 
-                // Update occupancy
-                for (int z = 0; z < trapGraph->n_zones; z++) {
-                    if (&trapGraph->zone_nodes[z] == ion_states[ion_id - 1]) {
-                        ion_states[ion_id - 1]->zone_occupancy--;
-                    }
-                    if (&trapGraph->zone_nodes[z] == dest) {
-                        dest->zone_occupancy++;
-                    }
-                }
-
-                ion_states[ion_id - 1] = dest;
-            }
-
-            for (int i = 0; i < trapGraph->n_zones; i++) {
-                printf("Zone %d Occupancy: %d\n", i + 1, trapGraph->zone_nodes[i].zone_occupancy);
-                printf("Zone %d Capacity: %d\n", i + 1, trapGraph->zone_nodes[i].zone_capacity);
-                printf("\n");
-            }
+        for (int i = 0; i < trapGraph->n_zones; i++) {
+            printf("Zone %d Occupancy: %d\n", i + 1, trapGraph->zone_nodes[i].zone_occupancy);
+            printf("Zone %d Capacity: %d\n", i + 1, trapGraph->zone_nodes[i].zone_capacity);
+            printf("\n");
         }
     }
 

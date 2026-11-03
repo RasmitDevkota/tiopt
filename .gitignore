@@ -9,6 +9,7 @@ trap.data
 /tests/tiopt-benchmark
 /examples/c/basic_trap
 /codesign.trap
+/designed.trap
 /examples/output/
 kernels_cl.h
 
