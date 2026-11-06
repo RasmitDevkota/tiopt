@@ -243,10 +243,12 @@ static int summarize_circuit
 	generate_linear_trap_graph(n_zones, codesign->zone_types, codesign->zone_capacities, 0.0, n_zones - 1, ION_HEIGHT, &trap_graph);
 
 	struct TransportProgram *transport_program = calloc(1, sizeof(struct TransportProgram));
-	if (generate_transport_schedule(&trap_graph, circuit_graph, transport_program) == NULL)
+	struct ScheduleTrace trace = { 0 };
+	if (generate_transport_schedule_strategy(&trap_graph, circuit_graph, transport_program, DEFAULT_SCHEDULE_STRATEGY, &trace) == NULL)
 	{
 		printf("ERROR: Failed to schedule the circuit on the zones '%s'\n", codesign->layout);
 
+		free_schedule_trace(&trace);
 		free_trap_graph(&trap_graph);
 		free_circuit_graph(circuit_graph);
 		free_transport_program(transport_program);
@@ -254,9 +256,9 @@ static int summarize_circuit
 		return 1;
 	}
 
-	int n_layers = 0;
-	for (int i = 0; i < circuit_graph->n_instruction_nodes; i++)
-		n_layers = MAX(n_layers, circuit_graph->layer_idxs[i]);
+	// The layers of the transport program are the rounds of the schedule, which split the layers of the circuit whose
+	// operations do not fit in the zones at once
+	int n_layers = trace.n_rounds;
 
 	codesign->n_ions = n_ions;
 	codesign->n_layers = n_layers;
@@ -268,102 +270,101 @@ static int summarize_circuit
 	codesign->layer_measure_zones = calloc(n_layers, sizeof(int));
 	codesign->static_well_zones = calloc(n_zones, sizeof(int));
 
-	// Follow the ions as the scheduler moves them: into the zones of their operations, and back into storage after each
-	// layer (which the transport program does not record, so the distance an ion moves back is added to its next
-	// transport)
+	// Follow the ions through the moves of the schedule: into the zones of their operations, and back into storage
+	// between them (which the transport program does not record, so the distance an ion moves back is added to its
+	// next transport)
 	struct ZoneNode *zones = trap_graph.zone_nodes;
 	for (int z = 0; z < n_zones; z++)
 		zones[z].zone_occupancy = 0;
 
-	struct ZoneNode **ion_states = malloc(n_ions * sizeof(struct ZoneNode*));
 	double *pending_distances = calloc(n_ions, sizeof(double));
-	double *positions_before = malloc(n_ions * sizeof(double));
 	for (int i = 0; i < n_ions; i++)
-	{
-		ion_states[i] = &zones[MIN(MAX((int) lround(transport_program->initial_positions[i][0]), 0), n_zones - 1)];
-		ion_states[i]->zone_occupancy++;
-	}
+		zones[MIN(MAX((int) lround(transport_program->initial_positions[i][0]), 0), n_zones - 1)].zone_occupancy++;
 
-	int *gate_zones_used = malloc(n_zones * sizeof(int));
-	int *measure_zones_used = malloc(n_zones * sizeof(int));
+	int *gate_zones_used = calloc(n_zones, sizeof(int));
+	int *measure_zones_used = calloc(n_zones, sizeof(int));
 
 	codesign->n_static_wells = 0;
 
-	for (int layer = 1; layer <= n_layers; layer++)
+	int layer = 0;
+	for (int m = 0; m <= trace.n_moves; m++)
 	{
-		memset(gate_zones_used, 0, n_zones * sizeof(int));
-		memset(measure_zones_used, 0, n_zones * sizeof(int));
+		struct IonMove *move = (m < trace.n_moves) ? &trace.moves[m] : NULL;
 
-		for (int t = 0; t < transport_program->n_transports; t++)
+		// Count the zones which the operations of a layer ran in, once the layer is over
+		int next_layer = (move == NULL) ? -1 : (move->transport >= 0) ? trace.transport_rounds[move->transport] : layer;
+		if (layer > 0 && next_layer != layer)
 		{
-			if (circuit_graph->layer_idxs[t] != layer)
-				continue;
-
-			struct InstructionNode *node = &circuit_graph->instruction_nodes[t];
-			int destination = MIN(MAX((int) lround(transport_program->destinations[t][0]), 0), n_zones - 1);
-
-			for (int i = 0; i < transport_program->transport_n_targets_list[t]; i++)
-			{
-				int ion = transport_program->transport_targets_list[t][i] - 1;
-
-				double distance = pending_distances[ion] + fabs(zones[destination].position[0] - ion_states[ion]->position[0]);
-				codesign->layer_distances[layer - 1] = MAX(codesign->layer_distances[layer - 1], distance);
-				pending_distances[ion] = 0.0;
-
-				ion_states[ion]->zone_occupancy--;
-				zones[destination].zone_occupancy++;
-				ion_states[ion] = &zones[destination];
-			}
-
-			if (node->operation_type & DETECT)
-			{
-				codesign->layer_measurements[layer - 1] += node->n_target_ions;
-				measure_zones_used[destination] = 1;
-			}
-			else
-			{
-				if (node->n_target_ions >= 2)
-					codesign->layer_two_qubit_gates[layer - 1]++;
-				else
-					codesign->layer_single_qubit_gates[layer - 1]++;
-
-				gate_zones_used[destination] = 1;
-			}
-
-			// The zones occupied at once by the most wells, which must all be held while ions wait for others
-			int n_occupied = 0;
 			for (int z = 0; z < n_zones; z++)
-				n_occupied += (zones[z].zone_occupancy > 0);
-
-			if (n_occupied > codesign->n_static_wells)
 			{
-				codesign->n_static_wells = 0;
-				for (int z = 0; z < n_zones; z++)
-					if (zones[z].zone_occupancy > 0)
-						codesign->static_well_zones[codesign->n_static_wells++] = z;
+				codesign->layer_gate_zones[layer - 1] += gate_zones_used[z];
+				codesign->layer_measure_zones[layer - 1] += measure_zones_used[z];
 			}
+
+			memset(gate_zones_used, 0, n_zones * sizeof(int));
+			memset(measure_zones_used, 0, n_zones * sizeof(int));
 		}
 
-		for (int z = 0; z < n_zones; z++)
+		if (move == NULL)
+			break;
+
+		int ion = move->ion - 1;
+		double distance = fabs(zones[move->to_zone].position[0] - zones[move->from_zone].position[0]);
+
+		zones[move->from_zone].zone_occupancy--;
+		zones[move->to_zone].zone_occupancy++;
+
+		if (move->transport < 0)
 		{
-			codesign->layer_gate_zones[layer - 1] += gate_zones_used[z];
-			codesign->layer_measure_zones[layer - 1] += measure_zones_used[z];
+			pending_distances[ion] += distance;
+			continue;
 		}
 
-		for (int i = 0; i < n_ions; i++)
-			positions_before[i] = ion_states[i]->position[0];
+		layer = next_layer;
+		codesign->layer_distances[layer - 1] = MAX(codesign->layer_distances[layer - 1], pending_distances[ion] + distance);
+		pending_distances[ion] = 0.0;
 
-		release_operation_zones(&trap_graph, ion_states, n_ions);
+		// Count each operation once all of its ions have arrived
+		int t = move->transport;
+		if (m + 1 < trace.n_moves && trace.moves[m + 1].transport == t)
+			continue;
 
-		for (int i = 0; i < n_ions; i++)
-			pending_distances[i] += fabs(ion_states[i]->position[0] - positions_before[i]);
+		struct InstructionNode *node = &circuit_graph->instruction_nodes[t];
+		int destination = move->to_zone;
+
+		if (node->operation_type & DETECT)
+		{
+			codesign->layer_measurements[layer - 1] += node->n_target_ions;
+			measure_zones_used[destination] = 1;
+		}
+		else
+		{
+			if (node->n_target_ions >= 2)
+				codesign->layer_two_qubit_gates[layer - 1]++;
+			else
+				codesign->layer_single_qubit_gates[layer - 1]++;
+
+			gate_zones_used[destination] = 1;
+		}
+
+		// The zones occupied at once by the most wells, which must all be held while ions wait for others
+		int n_occupied = 0;
+		for (int z = 0; z < n_zones; z++)
+			n_occupied += (zones[z].zone_occupancy > 0);
+
+		if (n_occupied > codesign->n_static_wells)
+		{
+			codesign->n_static_wells = 0;
+			for (int z = 0; z < n_zones; z++)
+				if (zones[z].zone_occupancy > 0)
+					codesign->static_well_zones[codesign->n_static_wells++] = z;
+		}
 	}
 
-	free(positions_before);
 	free(gate_zones_used);
 	free(measure_zones_used);
 	free(pending_distances);
-	free(ion_states);
+	free_schedule_trace(&trace);
 	free_transport_program(transport_program);
 	free_trap_graph(&trap_graph);
 	free_circuit_graph(circuit_graph);
