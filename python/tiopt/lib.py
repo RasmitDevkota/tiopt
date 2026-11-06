@@ -22,10 +22,10 @@ import numpy as np
 
 
 def library_path():
-    """Find libtiopt.so, which is at $TIOPT_LIBRARY if it is set and in the root of the repository otherwise."""
+    """Find libtiopt.so, which is at $TIOPT_LIBRARY if it is set and in the build directory of the repository otherwise."""
     if os.environ.get("TIOPT_LIBRARY"):
         return Path(os.environ["TIOPT_LIBRARY"])
-    return Path(__file__).resolve().parents[2] / "libtiopt.so"
+    return Path(__file__).resolve().parents[2] / "build" / "libtiopt.so"
 
 
 def _load_library():

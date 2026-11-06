@@ -14,7 +14,7 @@ FFTW_LIBS = -L$(FFTW_LIB_DIR) -lfftw3
 SHTOOLS_LIBS = -L$(SHTOOLS_LIB_DIR) -lSHTOOLS
 SHWRAPPER_LIBS = -L$(SHTOOLS_LIB_DIR) -lwrapper
 NLOPT_LIBS = -L$(NLOPT_LIB_DIR) -lnlopt
-TIOPT_LIBS = -L$(TIOPT_DIR) -ltiopt -Wl,-rpath,$(abspath $(TIOPT_DIR)) -Wl,-rpath,$(SHTOOLS_LIB_DIR)
+TIOPT_LIBS = -L$(TIOPT_DIR)/build -ltiopt -Wl,-rpath,$(abspath $(TIOPT_DIR)/build) -Wl,-rpath,$(SHTOOLS_LIB_DIR)
 
 # Compiler and flags
 FC = gfortran
@@ -28,7 +28,7 @@ CXXFLAGS = -O1 -Wall -fPIC -g
 C_SRC = test_utils.c test_ti_utils.c test_electrodynamics.c test_io.c test_verlet.c test_waveforms.c test_photonics.c test_quantum.c test_transport.c test_analysis.c test_acceleration.c test_codesign.c test_zones.c main.c
 
 # Header files (C)
-C_HDR = $(wildcard *.h) $(wildcard $(TIOPT_DIR)/*.h)
+C_HDR = $(wildcard *.h) $(wildcard $(TIOPT_DIR)/include/*.h)
 
 # Object files
 C_OBJ = $(C_SRC:.c=.o)
@@ -40,16 +40,16 @@ OUTPUT = tiopt-test
 all: $(OUTPUT)
 
 # Link the final executable
-$(OUTPUT): $(C_OBJ) $(TIOPT_DIR)/libtiopt.so
+$(OUTPUT): $(C_OBJ) $(TIOPT_DIR)/build/libtiopt.so
 	$(CC) $(C_OBJ) $(TIOPT_LIBS) $(SHTOOLS_LIBS) $(SHWRAPPER_LIBS) $(MATH_LIBS) $(GSL_LIBS) $(NLOPT_LIBS) -o $(OUTPUT)
 
 # Compile C code
 %.o: %.c $(C_HDR)
-	$(CC) -c $< $(CFLAGS) -I$(TIOPT_DIR) -o $@
+	$(CC) -c $< $(CFLAGS) -I$(TIOPT_DIR)/include -o $@
 
 # Build the library under test
-$(TIOPT_DIR)/libtiopt.so:
-	$(MAKE) -C $(TIOPT_DIR) libtiopt.so
+$(TIOPT_DIR)/build/libtiopt.so:
+	$(MAKE) -C $(TIOPT_DIR) build/libtiopt.so
 
 # Run the tests
 test: $(OUTPUT)
@@ -58,7 +58,7 @@ test: $(OUTPUT)
 # Benchmark the library on the CPU (serially and in parallel) and on the OpenCL device, if there is one
 BENCHMARK = tiopt-benchmark
 
-$(BENCHMARK): benchmark.o $(TIOPT_DIR)/libtiopt.so
+$(BENCHMARK): benchmark.o $(TIOPT_DIR)/build/libtiopt.so
 	$(CC) benchmark.o $(TIOPT_LIBS) $(SHTOOLS_LIBS) $(SHWRAPPER_LIBS) $(MATH_LIBS) $(GSL_LIBS) $(NLOPT_LIBS) -o $(BENCHMARK)
 
 benchmark: $(BENCHMARK)

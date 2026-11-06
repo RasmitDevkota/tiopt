@@ -11,7 +11,7 @@
 #include "analysis.h"
 #include "traps.h"
 #include "ions.h"
-#include "ion_heating/ion_heating.h"
+#include "ion_heating.h"
 #include "test_utils.h"
 
 int test_all_analysis
