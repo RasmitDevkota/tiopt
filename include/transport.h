@@ -2,12 +2,17 @@
 
 #include "data_structures.h"
 
-// How generate_transport_schedule_strategy assigns operations to zones
+// How generate_transport_schedule_strategy assigns operations to zones and moves ions between layers
 enum ScheduleStrategy
 {
-    SCHEDULE_BASELINE, // every layer at once, even if its operations do not fit in the zones together (in which case
-                       // ions are moved away before their operations happen, so the schedule is not valid)
-    SCHEDULE_ROUNDS, // layers split into rounds of operations which fit in the zones at once
+    SCHEDULE_BASELINE, // nearest zone for each operation in turn, and every ion back into storage after each layer
+                       // (each layer is one round, even if its operations do not all fit in the zones at once)
+    SCHEDULE_FAST, // the same schedule as SCHEDULE_BASELINE, computed without rescanning the circuit for each layer
+    SCHEDULE_ROUNDS, // as SCHEDULE_BASELINE, but splitting layers into rounds which fit in the zones
+    SCHEDULE_LOOKAHEAD, // as SCHEDULE_ROUNDS, but ions stay in their zone if their next operation is in the next layer
+                        // and can happen there
+    SCHEDULE_LAYER_ASSIGN, // as SCHEDULE_LOOKAHEAD, but the operations of each round are assigned to zones together,
+                           // to minimize the longest transport of the round
 };
 
 #ifndef DEFAULT_SCHEDULE_STRATEGY

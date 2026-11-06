@@ -64,14 +64,23 @@ $(BENCHMARK): benchmark.o $(TIOPT_DIR)/build/libtiopt.so
 benchmark: $(BENCHMARK)
 	./$(BENCHMARK)
 
+# Compare the strategies of the transport scheduler by the schedules they make and how long they take
+SCHEDULE_BENCHMARK = tiopt-schedule-benchmark
+
+$(SCHEDULE_BENCHMARK): schedule_benchmark.o $(TIOPT_DIR)/build/libtiopt.so
+	$(CC) schedule_benchmark.o $(TIOPT_LIBS) $(SHTOOLS_LIBS) $(SHWRAPPER_LIBS) $(MATH_LIBS) $(GSL_LIBS) $(NLOPT_LIBS) -o $(SCHEDULE_BENCHMARK)
+
+schedule-benchmark: $(SCHEDULE_BENCHMARK)
+	./$(SCHEDULE_BENCHMARK)
+
 # Clean up build files
 clean:
-	rm -f $(C_OBJ) $(OUTPUT) benchmark.o $(BENCHMARK)
+	rm -f $(C_OBJ) $(OUTPUT) benchmark.o $(BENCHMARK) schedule_benchmark.o $(SCHEDULE_BENCHMARK) schedule_benchmark.csv
 
 # Deep clean build files and outputs
 deep-clean:
-	rm -f $(C_OBJ) $(OUTPUT) benchmark.o $(BENCHMARK)
+	rm -f $(C_OBJ) $(OUTPUT) benchmark.o $(BENCHMARK) schedule_benchmark.o $(SCHEDULE_BENCHMARK) schedule_benchmark.csv
 	rm meshes/*
 
 # Phony targets
-.PHONY: all clean deep-clean test benchmark
+.PHONY: all clean deep-clean test benchmark schedule-benchmark

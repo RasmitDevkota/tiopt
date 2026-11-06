@@ -26,6 +26,21 @@ void compute_circuit_layers
 	struct CircuitGraph *circuit_graph
 );
 
+int sort_layers
+(
+	int n_nodes,
+	const int *layer_idxs,
+	int **order,
+	int **layer_starts
+);
+
+int sort_circuit_layers
+(
+	struct CircuitGraph *circuit_graph,
+	int **order,
+	int **layer_starts
+);
+
 void schedule_arrival_times
 (
 	struct CircuitGraph *circuit_graph,
@@ -96,5 +111,6 @@ void release_ions
 	struct TrapGraph *trap_graph,
 	struct ZoneNode **ion_states,
 	int n_ions,
+	const int *keep,
 	struct ScheduleTrace *trace
 );

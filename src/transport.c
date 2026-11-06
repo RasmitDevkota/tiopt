@@ -4,7 +4,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
+#include <math.h>
 
+#include "defs.h"
 #include "data_structures.h"
 #include "circuits.h"
 
@@ -93,8 +95,7 @@ static void transport_ions
     }
 }
 
-// Original scheduler, which runs every layer at once: when the zones are full, it moves every ion out of them,
-// including the ions of operations placed earlier in the layer, so its schedules are only valid if every layer fits
+// Original scheduler, which scans the whole circuit for the instructions of each layer
 static int schedule_baseline
 (
     struct TrapGraph *trapGraph,
@@ -127,7 +128,7 @@ static int schedule_baseline
             if (instructionType) {
                 instructionZone = select_operation_zone(trapGraph, instructionType, ion_states, instr->target_ions, instr->n_target_ions);
                 if (!instructionZone) {
-                    release_ions(trapGraph, ion_states, transportProgram->n_ions, trace);
+                    release_ions(trapGraph, ion_states, transportProgram->n_ions, NULL, trace);
                     instructionZone = select_operation_zone(trapGraph, instructionType, ion_states, instr->target_ions, instr->n_target_ions);
                 }
             }
@@ -147,7 +148,7 @@ static int schedule_baseline
 
         // Move ions to storage/empty zones once the layer is done, so that the operations of a layer can use several
         // instruction zones at once
-        release_ions(trapGraph, ion_states, transportProgram->n_ions, trace);
+        release_ions(trapGraph, ion_states, transportProgram->n_ions, NULL, trace);
 
         print_zone_occupancy(trapGraph);
     }
@@ -155,58 +156,310 @@ static int schedule_baseline
     return 0;
 }
 
-// Scheduler which splits each layer into rounds of operations which fit in the zones at once: each operation goes to
-// the nearest zone of its type with room for its ions, the operations which do not fit wait for the next round, and
-// the ions go back into storage after each round. Sets the round of each instruction, and returns the number of
-// rounds, or -1 if an operation does not fit in any zone
-static int schedule_rounds
+// Assign each operation of a layer to a zone of its type, so that the longest distance any target ion moves is as short
+// as possible (and then the total distance), with branch and bound over the zones of the operations in order of their
+// shortest possible transport, longest first; ions which no operation of the layer targets stay where they are. Returns
+// 1 if no assignment fits in the zones
+#define LAYER_ASSIGN_MAX_NODES 20000
+
+struct LayerAssignment
+{
+    struct TrapGraph *trapGraph;
+    int n_ops;
+    int *op_order; // operations in the order they are assigned
+    int *n_targets; // implicitly, length n_ops
+    int *n_candidates; // implicitly, length n_ops
+    int **candidates; // zones each operation can use, nearest first; implicitly, length n_ops-by-[n_candidates]
+    double **costs; // longest distance moved by a target ion for each candidate; implicitly, like candidates
+    double **sums; // total distance moved by the target ions for each candidate; implicitly, like candidates
+    int *free_capacity; // room left in each zone; implicitly, length n_zones
+    int *choice; // implicitly, length n_ops
+    int *best_choice; // implicitly, length n_ops
+    double best_max;
+    double best_sum;
+    int n_nodes;
+};
+
+static void search_layer_assignment(struct LayerAssignment *a, int depth, double max_cost, double sum_cost)
+{
+    if (a->n_nodes++ > LAYER_ASSIGN_MAX_NODES) {
+        return;
+    }
+
+    if (depth == a->n_ops) {
+        if (max_cost < a->best_max || (max_cost == a->best_max && sum_cost < a->best_sum)) {
+            a->best_max = max_cost;
+            a->best_sum = sum_cost;
+            memcpy(a->best_choice, a->choice, a->n_ops * sizeof(int));
+        }
+        return;
+    }
+
+    int k = a->op_order[depth];
+    for (int c = 0; c < a->n_candidates[k]; c++) {
+        // Candidates are sorted by cost, so no later one can do better
+        double cost = MAX(max_cost, a->costs[k][c]);
+        if (cost > a->best_max) {
+            break;
+        }
+
+        if (cost == a->best_max && sum_cost + a->sums[k][c] >= a->best_sum) {
+            continue;
+        }
+
+        int z = a->candidates[k][c];
+        if (a->free_capacity[z] < a->n_targets[k]) {
+            continue;
+        }
+
+        a->free_capacity[z] -= a->n_targets[k];
+        a->choice[k] = z;
+        search_layer_assignment(a, depth + 1, cost, sum_cost + a->sums[k][c]);
+        a->free_capacity[z] += a->n_targets[k];
+    }
+}
+
+static int assign_layer_zones
+(
+    struct TrapGraph *trapGraph,
+    struct CircuitGraph *circuitGraph,
+    struct ZoneNode **ion_states,
+    int *ops,
+    int n_ops,
+    struct ZoneNode **op_zones
+)
+{
+    int n_zones = trapGraph->n_zones;
+    struct ZoneNode *zones = trapGraph->zone_nodes;
+
+    struct LayerAssignment a = { trapGraph, n_ops };
+    a.op_order = calloc(n_ops, sizeof(int));
+    a.n_targets = calloc(n_ops, sizeof(int));
+    a.n_candidates = calloc(n_ops, sizeof(int));
+    a.candidates = calloc(n_ops, sizeof(int*));
+    a.costs = calloc(n_ops, sizeof(double*));
+    a.sums = calloc(n_ops, sizeof(double*));
+    a.free_capacity = malloc(n_zones * sizeof(int));
+    a.choice = malloc(n_ops * sizeof(int));
+    a.best_choice = malloc(n_ops * sizeof(int));
+    a.best_max = HUGE_VAL;
+    a.best_sum = HUGE_VAL;
+
+    // Room in each zone once the target ions of the layer have left it
+    for (int z = 0; z < n_zones; z++) {
+        a.free_capacity[z] = zones[z].zone_capacity - zones[z].zone_occupancy;
+    }
+
+    for (int k = 0; k < n_ops; k++) {
+        struct InstructionNode *instr = &circuitGraph->instruction_nodes[ops[k]];
+        for (int t = 0; t < instr->n_target_ions; t++) {
+            a.free_capacity[ion_states[instr->target_ions[t] - 1] - zones]++;
+        }
+    }
+
+    int status = 0;
+    double *shortest = calloc(n_ops, sizeof(double));
+
+    for (int k = 0; k < n_ops && status == 0; k++) {
+        struct InstructionNode *instr = &circuitGraph->instruction_nodes[ops[k]];
+        enum ZoneType type = operation_zone_type(instr);
+
+        a.n_targets[k] = instr->n_target_ions;
+        a.candidates[k] = malloc(n_zones * sizeof(int));
+        a.costs[k] = malloc(n_zones * sizeof(double));
+        a.sums[k] = malloc(n_zones * sizeof(double));
+
+        for (int z = 0; z < n_zones; z++) {
+            if (!(zones[z].zone_type & type) || a.free_capacity[z] < instr->n_target_ions) {
+                continue;
+            }
+
+            double cost = 0.0;
+            double sum = 0.0;
+            for (int t = 0; t < instr->n_target_ions; t++) {
+                double *position = ion_states[instr->target_ions[t] - 1]->position;
+                double distance = sqrt(pow(zones[z].position[0] - position[0], 2) + pow(zones[z].position[1] - position[1], 2) + pow(zones[z].position[2] - position[2], 2));
+
+                cost = MAX(cost, distance);
+                sum += distance;
+            }
+
+            // Insert in order of cost, then total distance
+            int c = a.n_candidates[k]++;
+            while (c > 0 && (a.costs[k][c - 1] > cost || (a.costs[k][c - 1] == cost && a.sums[k][c - 1] > sum))) {
+                a.candidates[k][c] = a.candidates[k][c - 1];
+                a.costs[k][c] = a.costs[k][c - 1];
+                a.sums[k][c] = a.sums[k][c - 1];
+                c--;
+            }
+            a.candidates[k][c] = z;
+            a.costs[k][c] = cost;
+            a.sums[k][c] = sum;
+        }
+
+        if (a.n_candidates[k] == 0) {
+            status = 1;
+        } else {
+            shortest[k] = a.costs[k][0];
+        }
+    }
+
+    // The operations of each type of zone need no more room than the zones of that type have, which rules out most
+    // layers that do not fit without a search
+    for (int k = 0; k < n_ops && status == 0; k++) {
+        enum ZoneType type = operation_zone_type(&circuitGraph->instruction_nodes[ops[k]]);
+
+        int needed = 0;
+        for (int j = 0; j < n_ops; j++) {
+            needed += (operation_zone_type(&circuitGraph->instruction_nodes[ops[j]]) == type) ? a.n_targets[j] : 0;
+        }
+
+        int room = 0;
+        for (int z = 0; z < n_zones; z++) {
+            room += (zones[z].zone_type & type) ? MAX(a.free_capacity[z], 0) : 0;
+        }
+
+        status = (needed > room);
+    }
+
+    if (status == 0) {
+        // Operations whose shortest transport is longest go first, since they bound the layer
+        for (int k = 0; k < n_ops; k++) {
+            int j = k;
+            while (j > 0 && shortest[a.op_order[j - 1]] < shortest[k]) {
+                a.op_order[j] = a.op_order[j - 1];
+                j--;
+            }
+            a.op_order[j] = k;
+        }
+
+        search_layer_assignment(&a, 0, 0.0, 0.0);
+
+        if (a.best_max == HUGE_VAL) {
+            status = 1;
+        } else {
+            for (int k = 0; k < n_ops; k++) {
+                op_zones[k] = &zones[a.best_choice[k]];
+            }
+        }
+    }
+
+    for (int k = 0; k < n_ops; k++) {
+        free(a.candidates[k]);
+        free(a.costs[k]);
+        free(a.sums[k]);
+    }
+
+    free(shortest);
+    free(a.op_order);
+    free(a.n_targets);
+    free(a.n_candidates);
+    free(a.candidates);
+    free(a.costs);
+    free(a.sums);
+    free(a.free_capacity);
+    free(a.choice);
+    free(a.best_choice);
+
+    return status;
+}
+
+// Scheduler which visits the instructions of each layer through the circuit sorted by layer; with SCHEDULE_FAST it gives
+// the same schedule as schedule_baseline, while the other strategies split each layer into rounds which fit in the
+// zones, SCHEDULE_LOOKAHEAD and SCHEDULE_LAYER_ASSIGN leave ions in their zone for an operation in the next layer, and
+// SCHEDULE_LAYER_ASSIGN also assigns the zones of each round together. Sets the round of each instruction, and returns
+// the number of rounds, or -1 if the circuit cannot be scheduled
+static int schedule_sorted
 (
     struct TrapGraph *trapGraph,
     struct CircuitGraph *circuitGraph,
     struct TransportProgram *transportProgram,
     struct ZoneNode **ion_states,
-    int max_layer,
+    enum ScheduleStrategy strategy,
     int *rounds,
     struct ScheduleTrace *trace
 )
 {
-    int *pending = malloc((circuitGraph->n_instruction_nodes > 0 ? circuitGraph->n_instruction_nodes : 1) * sizeof(int));
+    int n_ions = transportProgram->n_ions;
+    int n_nodes = circuitGraph->n_instruction_nodes;
+
+    int *order;
+    int *layer_starts;
+    int max_layer = sort_circuit_layers(circuitGraph, &order, &layer_starts);
+
+    // Operations of each ion in order (which is also the order of their layers), to look ahead to its next operation
+    int *ion_op_starts = calloc(n_ions + 1, sizeof(int));
+    for (int i = 0; i < n_nodes; i++) {
+        for (int t = 0; t < circuitGraph->instruction_nodes[i].n_target_ions; t++) {
+            ion_op_starts[circuitGraph->instruction_nodes[i].target_ions[t]]++;
+        }
+    }
+    for (int ion = 1; ion <= n_ions; ion++) {
+        ion_op_starts[ion] += ion_op_starts[ion - 1];
+    }
+
+    int *ion_ops = malloc(MAX(ion_op_starts[n_ions], 1) * sizeof(int));
+    int *ion_next = malloc(n_ions * sizeof(int));
+    memcpy(ion_next, ion_op_starts, n_ions * sizeof(int));
+    for (int i = 0; i < n_nodes; i++) {
+        for (int t = 0; t < circuitGraph->instruction_nodes[i].n_target_ions; t++) {
+            int ion = circuitGraph->instruction_nodes[i].target_ions[t] - 1;
+            ion_ops[ion_next[ion]++] = i;
+        }
+    }
+    memcpy(ion_next, ion_op_starts, n_ions * sizeof(int));
+
+    int *keep = calloc(n_ions, sizeof(int));
+    int *next_ops = malloc(n_ions * sizeof(int));
+    int *zone_reserved = malloc(MAX(trapGraph->n_zones, 1) * sizeof(int));
+    int *pending = malloc(MAX(n_nodes, 1) * sizeof(int));
+    int *round_ops = malloc(MAX(n_nodes, 1) * sizeof(int));
+    int *trial_ops = malloc(MAX(n_nodes, 1) * sizeof(int));
+    struct ZoneNode **op_zones = malloc(MAX(n_nodes, 1) * sizeof(struct ZoneNode*));
+
     int n_rounds = 0;
     int status = 0;
 
     for (int layer = 1; layer <= max_layer && status == 0; layer++) {
-        int n_pending = 0;
-        for (int i = 0; i < circuitGraph->n_instruction_nodes; i++) {
-            if (circuitGraph->layer_idxs[i] != layer) {
-                continue;
-            }
+        int n_pending = layer_starts[layer] - layer_starts[layer - 1];
 
+        for (int k = 0; k < n_pending; k++) {
+            int i = order[layer_starts[layer - 1] + k];
             struct InstructionNode *instr = &circuitGraph->instruction_nodes[i];
 
+            pending[k] = i;
             transportProgram->transport_n_targets_list[i] = instr->n_target_ions;
             transportProgram->transport_targets_list[i] = (int *)malloc(sizeof(int) * instr->n_target_ions);
-            pending[n_pending++] = i;
+
+            if (!operation_zone_type(instr)) {
+                printf("ERROR: No available instruction zone for instruction %d.\n", instr->graphindex);
+                status = 1;
+            }
         }
 
-        while (n_pending > 0) {
+        if (status != 0) {
+            break;
+        }
+
+        if (strategy == SCHEDULE_FAST) {
+            // Ions which already took part in the layer are released along with the others when the zones are full, as
+            // in schedule_baseline
             n_rounds++;
 
-            // Nearest zone for each operation in turn, leaving the operations which do not fit for the next round
-            int n_left = 0;
             for (int k = 0; k < n_pending; k++) {
                 struct InstructionNode *instr = &circuitGraph->instruction_nodes[pending[k]];
                 enum ZoneType instructionType = operation_zone_type(instr);
 
-                if (!instructionType) {
+                struct ZoneNode *instructionZone = select_operation_zone(trapGraph, instructionType, ion_states, instr->target_ions, instr->n_target_ions);
+                if (!instructionZone) {
+                    release_ions(trapGraph, ion_states, n_ions, NULL, trace);
+                    instructionZone = select_operation_zone(trapGraph, instructionType, ion_states, instr->target_ions, instr->n_target_ions);
+                }
+
+                if (!instructionZone) {
                     printf("ERROR: No available instruction zone for instruction %d.\n", instr->graphindex);
                     status = 1;
                     break;
-                }
-
-                struct ZoneNode *instructionZone = select_operation_zone(trapGraph, instructionType, ion_states, instr->target_ions, instr->n_target_ions);
-                if (!instructionZone) {
-                    pending[n_left++] = pending[k];
-                    continue;
                 }
 
                 rounds[pending[k]] = n_rounds;
@@ -216,23 +469,202 @@ static int schedule_rounds
             if (status != 0) {
                 break;
             }
+        }
 
-            if (n_left == n_pending) {
+        // Rounds of the operations of the layer which fit in the zones at once
+        while (strategy != SCHEDULE_FAST && n_pending > 0) {
+            n_rounds++;
+
+            // When looking ahead, the operations whose ions already wait in a zone where they can happen go first, so
+            // that other operations do not take their room
+            if (strategy == SCHEDULE_LOOKAHEAD || strategy == SCHEDULE_LAYER_ASSIGN) {
+                int n_first = 0;
+                for (int k = 0; k < n_pending; k++) {
+                    struct InstructionNode *instr = &circuitGraph->instruction_nodes[pending[k]];
+
+                    int waiting = 0;
+                    for (int t = 0; t < instr->n_target_ions; t++) {
+                        waiting |= (ion_states[instr->target_ions[t] - 1]->zone_type & operation_zone_type(instr)) != 0;
+                    }
+
+                    if (waiting) {
+                        int op = pending[k];
+                        memmove(&pending[n_first + 1], &pending[n_first], (k - n_first) * sizeof(int));
+                        pending[n_first++] = op;
+                    }
+                }
+            }
+
+            // Make room by moving the ions which the rest of the layer does not use out of the operation zones
+            memset(keep, 0, n_ions * sizeof(int));
+            for (int k = 0; k < n_pending; k++) {
+                struct InstructionNode *instr = &circuitGraph->instruction_nodes[pending[k]];
+                for (int t = 0; t < instr->n_target_ions; t++) {
+                    keep[instr->target_ions[t] - 1] = 1;
+                }
+            }
+
+            int n_round = 0;
+
+            // If ions waiting in the operation zones for later operations of the layer block every operation, move
+            // them out too and try again
+            for (int attempt = 0; attempt < 2 && n_round == 0; attempt++) {
+                if (attempt == 1) {
+                    release_ions(trapGraph, ion_states, n_ions, NULL, trace);
+                }
+
+                if (strategy == SCHEDULE_LAYER_ASSIGN) {
+                    if (assign_layer_zones(trapGraph, circuitGraph, ion_states, pending, n_pending, op_zones) == 0) {
+                        memcpy(round_ops, pending, n_pending * sizeof(int));
+                        n_round = n_pending;
+                    } else {
+                        release_ions(trapGraph, ion_states, n_ions, keep, trace);
+
+                        if (assign_layer_zones(trapGraph, circuitGraph, ion_states, pending, n_pending, op_zones) == 0) {
+                            memcpy(round_ops, pending, n_pending * sizeof(int));
+                            n_round = n_pending;
+                        } else {
+                            // Take the operations in order while they still fit together
+                            for (int k = 0; k < n_pending; k++) {
+                                memcpy(trial_ops, round_ops, n_round * sizeof(int));
+                                trial_ops[n_round] = pending[k];
+
+                                if (assign_layer_zones(trapGraph, circuitGraph, ion_states, trial_ops, n_round + 1, op_zones) == 0) {
+                                    round_ops[n_round++] = pending[k];
+                                }
+                            }
+
+                            if (n_round > 0) {
+                                assign_layer_zones(trapGraph, circuitGraph, ion_states, round_ops, n_round, op_zones);
+                            }
+                        }
+                    }
+
+                    for (int k = 0; k < n_round; k++) {
+                        rounds[round_ops[k]] = n_rounds;
+                        transport_ions(trapGraph, ion_states, &circuitGraph->instruction_nodes[round_ops[k]], round_ops[k], op_zones[k], transportProgram, trace);
+                    }
+                } else {
+                    // Nearest zone for each operation in turn, leaving the operations which do not fit for the next round
+                    int released = 0;
+
+                    for (int k = 0; k < n_pending; k++) {
+                        struct InstructionNode *instr = &circuitGraph->instruction_nodes[pending[k]];
+                        enum ZoneType instructionType = operation_zone_type(instr);
+
+                        struct ZoneNode *instructionZone = select_operation_zone(trapGraph, instructionType, ion_states, instr->target_ions, instr->n_target_ions);
+                        if (!instructionZone && !released) {
+                            release_ions(trapGraph, ion_states, n_ions, keep, trace);
+                            released = 1;
+                            instructionZone = select_operation_zone(trapGraph, instructionType, ion_states, instr->target_ions, instr->n_target_ions);
+                        }
+
+                        if (!instructionZone) {
+                            continue;
+                        }
+
+                        rounds[pending[k]] = n_rounds;
+                        round_ops[n_round++] = pending[k];
+                        transport_ions(trapGraph, ion_states, instr, pending[k], instructionZone, transportProgram, trace);
+                    }
+                }
+            }
+
+            if (n_round == 0) {
                 printf("ERROR: No available instruction zone for instruction %d.\n", circuitGraph->instruction_nodes[pending[0]].graphindex);
                 status = 1;
                 break;
             }
 
+            // Operations left for the next round
+            int n_left = 0;
+            for (int k = 0; k < n_pending; k++) {
+                int done = 0;
+                for (int r = 0; r < n_round; r++) {
+                    done |= (round_ops[r] == pending[k]);
+                }
+
+                if (!done) {
+                    pending[n_left++] = pending[k];
+                }
+            }
             n_pending = n_left;
 
-            // Move ions to storage/empty zones once the round is done, to make room for the next round
-            release_ions(trapGraph, ion_states, transportProgram->n_ions, trace);
+            // The ions of this round are done with the layer, so they make room for the next round
+            if (n_pending > 0) {
+                memset(keep, 1, n_ions * sizeof(int));
+                for (int r = 0; r < n_round; r++) {
+                    struct InstructionNode *instr = &circuitGraph->instruction_nodes[round_ops[r]];
+                    for (int t = 0; t < instr->n_target_ions; t++) {
+                        keep[instr->target_ions[t] - 1] = 0;
+                    }
+                }
 
-            print_zone_occupancy(trapGraph);
+                release_ions(trapGraph, ion_states, n_ions, keep, trace);
+            }
         }
+
+        if (status != 0) {
+            break;
+        }
+
+        // Move ions to storage/empty zones once the layer is done, except (when looking ahead) the ions whose next
+        // operation is in the next layer and can happen in the zone they are in
+        memset(keep, 0, n_ions * sizeof(int));
+
+        if (strategy == SCHEDULE_LOOKAHEAD || strategy == SCHEDULE_LAYER_ASSIGN) {
+            memset(zone_reserved, 0, trapGraph->n_zones * sizeof(int));
+
+            for (int ion = 0; ion < n_ions; ion++) {
+                while (ion_next[ion] < ion_op_starts[ion + 1] && circuitGraph->layer_idxs[ion_ops[ion_next[ion]]] <= layer) {
+                    ion_next[ion]++;
+                }
+
+                next_ops[ion] = -1;
+                if (ion_next[ion] == ion_op_starts[ion + 1]) {
+                    continue;
+                }
+
+                int next = ion_ops[ion_next[ion]];
+                struct InstructionNode *instr = &circuitGraph->instruction_nodes[next];
+                if (circuitGraph->layer_idxs[next] != layer + 1 || !(ion_states[ion]->zone_type & operation_zone_type(instr))) {
+                    continue;
+                }
+
+                next_ops[ion] = next;
+
+                // Only as many ions stay in a zone as leave room for every ion of their next operations, so that the
+                // ions they wait for can join them
+                int shared = 0;
+                for (int other = 0; other < ion; other++) {
+                    shared |= keep[other] && ion_states[other] == ion_states[ion] && next_ops[other] == next;
+                }
+
+                int z = ion_states[ion] - trapGraph->zone_nodes;
+                if (shared) {
+                    keep[ion] = 1;
+                } else if (zone_reserved[z] + instr->n_target_ions <= ion_states[ion]->zone_capacity) {
+                    keep[ion] = 1;
+                    zone_reserved[z] += instr->n_target_ions;
+                }
+            }
+        }
+
+        release_ions(trapGraph, ion_states, n_ions, keep, trace);
     }
 
+    free(op_zones);
+    free(trial_ops);
+    free(round_ops);
     free(pending);
+    free(zone_reserved);
+    free(next_ops);
+    free(keep);
+    free(ion_next);
+    free(ion_ops);
+    free(ion_op_starts);
+    free(order);
+    free(layer_starts);
 
     return (status == 0) ? n_rounds : -1;
 }
@@ -249,7 +681,7 @@ struct TransportProgram* generate_transport_schedule
 }
 
 // Generates transport schedule given circuit data and trap data with a given strategy, recording every move of the ions
-// and the round of each transport in trace if it is not NULL
+// in trace if it is not NULL
 struct TransportProgram* generate_transport_schedule_strategy
 (
     struct TrapGraph *trapGraph,
@@ -316,12 +748,12 @@ struct TransportProgram* generate_transport_schedule_strategy
     }
 
     // Non-empty circuit, with the round of each instruction
-    int *rounds = calloc(circuitGraph->n_instruction_nodes, sizeof(int));
+    int *rounds = calloc(MAX(circuitGraph->n_instruction_nodes, 1), sizeof(int));
     int n_rounds;
     if (strategy == SCHEDULE_BASELINE) {
         n_rounds = (schedule_baseline(trapGraph, circuitGraph, transportProgram, ion_states, max_layer, rounds, trace) == 0) ? max_layer : -1;
     } else {
-        n_rounds = schedule_rounds(trapGraph, circuitGraph, transportProgram, ion_states, max_layer, rounds, trace);
+        n_rounds = schedule_sorted(trapGraph, circuitGraph, transportProgram, ion_states, strategy, rounds, trace);
     }
 
     free(ion_states);
@@ -350,7 +782,7 @@ struct TransportProgram* generate_transport_schedule_strategy
     return transportProgram;
 }
 
-// Free the moves and rounds of a schedule trace
+// Free the moves of a schedule trace
 void free_schedule_trace(struct ScheduleTrace *trace)
 {
     free(trace->moves);
@@ -358,22 +790,25 @@ void free_schedule_trace(struct ScheduleTrace *trace)
 
     trace->moves = NULL;
     trace->transport_rounds = NULL;
+    trace->n_rounds = 0;
     trace->n_moves = 0;
     trace->max_moves = 0;
-    trace->n_rounds = 0;
 }
 
-// Helper to get operation type from QASM code
+// Helper to get operation type from QASM code, ignoring the parameters of the gate (e.g. "rz(0.5)"), which do not
+// change where it happens
 enum OperationType get_operation_type(const char *op)
 {
-    if (strcmp(op, "h") == 0) return QUBIT;
-    if (strcmp(op, "x") == 0) return QUBIT;
-    if (strcmp(op, "y") == 0) return QUBIT;
-    if (strcmp(op, "z") == 0) return QUBIT;
+    static const char *gates[] = {
+        "h", "x", "y", "z", "s", "sdg", "t", "tdg", "sx", "rx", "ry", "rz", "p",
+        "cx", "cy", "cz", "swap", "cp", "crx", "cry", "crz", "rxx", "ryy", "rzz",
+    };
 
-    if (strcmp(op, "cx") == 0) return QUBIT;
-    if (strcmp(op, "cy") == 0) return QUBIT;
-    if (strcmp(op, "cz") == 0) return QUBIT;
+    size_t length = strcspn(op, "(");
+
+    for (size_t g = 0; g < sizeof(gates) / sizeof(gates[0]); g++) {
+        if (strlen(gates[g]) == length && strncmp(op, gates[g], length) == 0) return QUBIT;
+    }
 
     if (strcmp(op, "measure") == 0) return DETECT;
 

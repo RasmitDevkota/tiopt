@@ -1,0 +1,42 @@
+// QAOA MaxCut with p = 2 on a random 3-regular graph of 6 vertices
+qubit[6] qreg;
+bit[6] creg;
+
+h qreg[0];
+h qreg[1];
+h qreg[2];
+h qreg[3];
+h qreg[4];
+h qreg[5];
+rzz(0.5) qreg[0], qreg[2];
+rzz(0.5) qreg[0], qreg[3];
+rzz(0.5) qreg[0], qreg[4];
+rzz(0.5) qreg[1], qreg[2];
+rzz(0.5) qreg[1], qreg[4];
+rzz(0.5) qreg[1], qreg[5];
+rzz(0.5) qreg[2], qreg[3];
+rzz(0.5) qreg[3], qreg[5];
+rzz(0.5) qreg[4], qreg[5];
+rx(0.3) qreg[0];
+rx(0.3) qreg[1];
+rx(0.3) qreg[2];
+rx(0.3) qreg[3];
+rx(0.3) qreg[4];
+rx(0.3) qreg[5];
+rzz(0.5) qreg[0], qreg[2];
+rzz(0.5) qreg[0], qreg[3];
+rzz(0.5) qreg[0], qreg[4];
+rzz(0.5) qreg[1], qreg[2];
+rzz(0.5) qreg[1], qreg[4];
+rzz(0.5) qreg[1], qreg[5];
+rzz(0.5) qreg[2], qreg[3];
+rzz(0.5) qreg[3], qreg[5];
+rzz(0.5) qreg[4], qreg[5];
+rx(0.3) qreg[0];
+rx(0.3) qreg[1];
+rx(0.3) qreg[2];
+rx(0.3) qreg[3];
+rx(0.3) qreg[4];
+rx(0.3) qreg[5];
+
+measure qreg -> creg;

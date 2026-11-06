@@ -355,7 +355,15 @@ The sources are in `src` and their headers in `include`.
 - `acceleration.c` and `kernels.cl` - threads and the OpenCL backend (which is loaded at runtime) with its kernels
 - `bindings.c` - helpers for the Python bindings
 
-`generate_transport_schedule` splits each layer of a circuit into rounds of operations which fit in the zones at once, which run one after another (`SCHEDULE_BASELINE` in `generate_transport_schedule_strategy` runs every layer at once instead, which only gives a valid schedule if every layer fits). Note that the transport programs record each transport into the zone of an operation, but not the transports of the ions back into storage after each round; `generate_transport_schedule_strategy` records them in a `ScheduleTrace`, along with the round of each transport, and the co-design flow adds them to the next transport of each ion. Circuits with gates which the parser does not know are rejected, and the scheduler prints the occupancy of the zones as it goes only if `TIOPT_SCHEDULE_VERBOSE` is set.
+`generate_transport_schedule` splits each layer of a circuit into rounds of operations which fit in the zones at once, which run one after another. Note that the transport programs record each transport into the zone of an operation, but not the transports of the ions back into storage after each round; `generate_transport_schedule_strategy` records them in a `ScheduleTrace`, along with the round of each transport (the co-design flow adds them to the next transport of each ion), and takes one of the following strategies:
+
+- `SCHEDULE_BASELINE` - the nearest zone for each operation in turn, with every ion moved back into storage after each layer. Every layer is run at once, even when its operations don't fit in the zones together, in which case ions are moved away before their operations happen
+- `SCHEDULE_FAST` - the same schedule as the baseline, without scanning the whole circuit for each layer
+- `SCHEDULE_ROUNDS` (the default) - the baseline, but with layers split into rounds which fit in the zones, so that its schedules are always valid
+- `SCHEDULE_LOOKAHEAD` - rounds, but with ions left in their zone when their next operation is in the next layer and can happen there (as long as the zone has room for the rest of the ions of that operation)
+- `SCHEDULE_LAYER_ASSIGN` - lookahead, but with the operations of each round assigned to zones together, to minimize the longest transport of the round
+
+`make -C tests schedule-benchmark` compares the strategies on GHZ, Bernstein-Vazirani, QFT, QAOA MaxCut, Trotterized Ising and Heisenberg, and Cuccaro adder circuits of 6, 12, and 16 qubits (made by `tests/quantumcircuits/generate_benchmark_circuits.py`) on three zone layouts, and `python3 tests/summarize_schedule_benchmark.py tests/schedule_benchmark.csv` summarizes the results by circuit family. Circuits with gates which the parser does not know are rejected, and the scheduler prints the occupancy of the zones as it goes only if `TIOPT_SCHEDULE_VERBOSE` is set.
 
 # Circuits, pulses, and transport
 

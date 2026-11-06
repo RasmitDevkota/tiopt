@@ -1,0 +1,470 @@
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <math.h>
+#include <time.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <dirent.h>
+
+#include "defs.h"
+#include "data_structures.h"
+#include "circuits.h"
+#include "transport.h"
+#include "zones.h"
+
+// Compare the strategies of generate_transport_schedule_strategy on circuits and zone layouts, by the schedules they
+// make (following the ions through every move, including the moves back into storage which transport programs do not
+// record) and by how long they take to make them
+
+#define ZONE_SPACING 100.0 // distance between neighboring zones (µm)
+#define MIN_RUNS 5
+#define MAX_RUNS 1000
+#define MIN_TIME 0.2 // shortest time spent timing each strategy (s)
+
+static const char *strategy_names[] = { "baseline", "fast", "rounds", "lookahead", "layer-assign" };
+static const enum ScheduleStrategy strategies[] = { SCHEDULE_BASELINE, SCHEDULE_FAST, SCHEDULE_ROUNDS, SCHEDULE_LOOKAHEAD, SCHEDULE_LAYER_ASSIGN };
+#define N_STRATEGIES 5
+
+// Every circuit in this directory, made by quantumcircuits/generate_benchmark_circuits.py
+#define CIRCUIT_DIR "quantumcircuits/benchmarks"
+
+static const char *layouts[] = {
+	"load+storage, empty, gate, empty, measure",
+	"load+storage, gate, gate, measure",
+	"load, storage x2, gate x5, measure",
+};
+#define N_LAYOUTS 3
+
+// Results of one strategy on one circuit and layout
+struct ScheduleResult
+{
+	int scheduled; // whether the scheduler made a schedule
+	int n_invalid; // operations whose ions are not all in a zone of the right type when it happens, and zones over capacity
+	double makespan; // (s)
+	double distance; // total distance moved by the ions (µm)
+	int n_moves; // moves of an ion to a different zone
+	double run_time; // median time taken by the scheduler (s)
+};
+
+static double wall_time
+(
+)
+{
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+
+	return t.tv_sec + 1E-9 * t.tv_nsec;
+}
+
+static int compare_doubles
+(
+	const void *a,
+	const void *b
+)
+{
+	double x = *(const double *) a;
+	double y = *(const double *) b;
+
+	return (x > y) - (x < y);
+}
+
+// Send stdout to /dev/null (silence = 1) or back (silence = 0), to hide the output of the parser and scheduler
+static void silence_stdout
+(
+	int silence
+)
+{
+	static int saved = -1;
+
+	fflush(stdout);
+
+	if (silence && saved < 0)
+	{
+		saved = dup(1);
+		int devnull = open("/dev/null", O_WRONLY);
+		dup2(devnull, 1);
+		close(devnull);
+	}
+	else if (!silence && saved >= 0)
+	{
+		dup2(saved, 1);
+		close(saved);
+		saved = -1;
+	}
+}
+
+static double zone_distance
+(
+	struct TrapGraph *trap_graph,
+	int a,
+	int b
+)
+{
+	double *p = trap_graph->zone_nodes[a].position;
+	double *q = trap_graph->zone_nodes[b].position;
+
+	return sqrt(pow(p[0] - q[0], 2) + pow(p[1] - q[1], 2) + pow(p[2] - q[2], 2));
+}
+
+// Duration of an operation, as in schedule_arrival_times
+static double operation_duration
+(
+	struct InstructionNode *node
+)
+{
+	if (node->operation_duration > 0.0)
+		return node->operation_duration;
+
+	if (node->operation_type & DETECT)
+		return DETECTION_DURATION;
+
+	if (node->operation_type & COOL)
+		return COOLING_DURATION;
+
+	return GATE_DURATION;
+}
+
+static enum ZoneType operation_zone_type
+(
+	struct InstructionNode *node
+)
+{
+	if (node->operation_type & QUBIT)
+		return GATE_ZONE;
+
+	if (node->operation_type & COOL)
+		return COOL_ZONE;
+
+	if (node->operation_type & DETECT)
+		return MEASURE_ZONE;
+
+	return 0;
+}
+
+// Follow the ions through the moves of a schedule, checking that every operation finds its ions in a zone of its type
+// with room for them, and adding up the makespan: in each round, the ions first move back into storage and then into
+// the zones of their operations (each all at once), and then the operations run
+static void evaluate_schedule
+(
+	struct TrapGraph *trap_graph,
+	struct CircuitGraph *circuit_graph,
+	struct TransportProgram *transport_program,
+	struct ScheduleTrace *trace,
+	struct ScheduleResult *result
+)
+{
+	int n_ions = circuit_graph->n_ions;
+	int n_zones = trap_graph->n_zones;
+
+	// Rounds of the schedule, which are called layers here
+	int *order;
+	int *layer_starts;
+	int n_layers = sort_layers(circuit_graph->n_instruction_nodes, trace->transport_rounds, &order, &layer_starts);
+
+	int *ion_zones = malloc(n_ions * sizeof(int));
+	int *occupancy = calloc(n_zones, sizeof(int));
+	for (int i = 0; i < n_ions; i++)
+	{
+		ion_zones[i] = 0;
+		for (int z = 0; z < n_zones; z++)
+			if (memcmp(trap_graph->zone_nodes[z].position, transport_program->initial_positions[i], sizeof(double[3])) == 0)
+				ion_zones[i] = z;
+
+		occupancy[ion_zones[i]]++;
+	}
+
+	// Moves of the targets of each layer still to come
+	int *layer_moves = calloc(n_layers + 1, sizeof(int));
+	for (int i = 0; i < circuit_graph->n_instruction_nodes; i++)
+		layer_moves[trace->transport_rounds[i]] += circuit_graph->instruction_nodes[i].n_target_ions;
+
+	double *release_distances = calloc(n_ions, sizeof(double));
+	double *transport_distances = calloc(n_ions, sizeof(double));
+	int *op_zones = malloc(circuit_graph->n_instruction_nodes * sizeof(int));
+
+	result->n_invalid = 0;
+	result->makespan = 0.0;
+	result->distance = 0.0;
+	result->n_moves = 0;
+
+	int layer = 1;
+	for (int m = 0; m < trace->n_moves && layer <= n_layers; m++)
+	{
+		struct IonMove *move = &trace->moves[m];
+		int ion = move->ion - 1;
+		double distance = zone_distance(trap_graph, move->from_zone, move->to_zone);
+
+		result->distance += distance;
+		result->n_moves += (move->from_zone != move->to_zone);
+
+		occupancy[move->from_zone]--;
+		occupancy[move->to_zone]++;
+		ion_zones[ion] = move->to_zone;
+
+		if (move->transport < 0)
+		{
+			release_distances[ion] += distance;
+			continue;
+		}
+
+		transport_distances[ion] += distance;
+		op_zones[move->transport] = move->to_zone;
+
+		if (--layer_moves[layer] > 0)
+			continue;
+
+		// Every ion of the layer has arrived, so its operations run now
+		double max_release = 0.0;
+		double max_transport = 0.0;
+		double max_duration = 0.0;
+		for (int i = 0; i < n_ions; i++)
+		{
+			max_release = MAX(max_release, release_distances[i]);
+			max_transport = MAX(max_transport, transport_distances[i]);
+			release_distances[i] = 0.0;
+			transport_distances[i] = 0.0;
+		}
+
+		for (int o = layer_starts[layer - 1]; o < layer_starts[layer]; o++)
+		{
+			struct InstructionNode *node = &circuit_graph->instruction_nodes[order[o]];
+			int zone = op_zones[order[o]];
+
+			int n_wrong = !(trap_graph->zone_nodes[zone].zone_type & operation_zone_type(node));
+			for (int t = 0; t < node->n_target_ions; t++)
+				n_wrong += (ion_zones[node->target_ions[t] - 1] != zone);
+
+			result->n_invalid += (n_wrong > 0);
+			max_duration = MAX(max_duration, operation_duration(node));
+		}
+
+		for (int z = 0; z < n_zones; z++)
+			result->n_invalid += (occupancy[z] > trap_graph->zone_nodes[z].zone_capacity);
+
+		result->makespan += (max_release + max_transport) / TRANSPORT_SPEED_LIMIT + max_duration;
+		layer++;
+	}
+
+	// Layers whose ions never all arrived
+	result->n_invalid += n_layers + 1 - layer;
+
+	free(op_zones);
+	free(transport_distances);
+	free(release_distances);
+	free(layer_moves);
+	free(occupancy);
+	free(ion_zones);
+	free(order);
+	free(layer_starts);
+}
+
+// Whether two transport programs and traces are exactly the same
+static int same_schedule
+(
+	struct TransportProgram *a,
+	struct ScheduleTrace *trace_a,
+	struct TransportProgram *b,
+	struct ScheduleTrace *trace_b
+)
+{
+	if (a->n_transports != b->n_transports || trace_a->n_moves != trace_b->n_moves || trace_a->n_rounds != trace_b->n_rounds)
+		return 0;
+
+	if (memcmp(trace_a->transport_rounds, trace_b->transport_rounds, a->n_transports * sizeof(int)) != 0)
+		return 0;
+
+	if (memcmp(a->arrival_times, b->arrival_times, a->n_transports * sizeof(double)) != 0 ||
+		memcmp(a->destinations, b->destinations, a->n_transports * sizeof(double[3])) != 0 ||
+		memcmp(a->transport_n_targets_list, b->transport_n_targets_list, a->n_transports * sizeof(int)) != 0 ||
+		memcmp(trace_a->moves, trace_b->moves, trace_a->n_moves * sizeof(struct IonMove)) != 0)
+		return 0;
+
+	for (int t = 0; t < a->n_transports; t++)
+		if (memcmp(a->transport_targets_list[t], b->transport_targets_list[t], a->transport_n_targets_list[t] * sizeof(int)) != 0)
+			return 0;
+
+	return 1;
+}
+
+static struct TransportProgram* run_schedule
+(
+	struct TrapGraph *trap_graph,
+	struct CircuitGraph *circuit_graph,
+	enum ScheduleStrategy strategy,
+	struct ScheduleTrace *trace
+)
+{
+	for (int z = 0; z < trap_graph->n_zones; z++)
+		trap_graph->zone_nodes[z].zone_occupancy = 0;
+
+	struct TransportProgram *transport_program = calloc(1, sizeof(struct TransportProgram));
+
+	silence_stdout(1);
+	struct TransportProgram *result = generate_transport_schedule_strategy(trap_graph, circuit_graph, transport_program, strategy, trace);
+	silence_stdout(0);
+
+	if (result == NULL)
+	{
+		free_transport_program(transport_program);
+		return NULL;
+	}
+
+	return transport_program;
+}
+
+int main
+(
+	int argc,
+	char **argv
+)
+{
+	const char *csv_filename = (argc > 1) ? argv[1] : "schedule_benchmark.csv";
+	FILE *csv = fopen(csv_filename, "w");
+	if (csv != NULL)
+		fprintf(csv, "circuit,qubits,operations,layout,strategy,scheduled,invalid,rounds,makespan_us,distance_um,moves,run_time_us\n");
+
+	int n_mismatches = 0;
+	int n_worse = 0;
+
+	struct dirent **entries;
+	int n_entries = scandir(CIRCUIT_DIR, &entries, NULL, alphasort);
+	if (n_entries < 0)
+	{
+		printf("ERROR: Failed to read the circuits in '%s'\n", CIRCUIT_DIR);
+		return 1;
+	}
+
+	printf("%-20s %-42s %-13s %7s %7s %12s %13s %7s %12s\n", "circuit", "layout", "strategy", "valid", "rounds", "makespan(us)", "distance(um)", "moves", "time(us)");
+
+	for (int c = 0; c < n_entries; c++)
+	{
+		const char *circuit_name = entries[c]->d_name;
+		size_t length = strlen(circuit_name);
+		if (length < 5 || strcmp(circuit_name + length - 5, ".qasm") != 0)
+			continue;
+
+		char filename[512];
+		snprintf(filename, sizeof(filename), "%s/%s", CIRCUIT_DIR, circuit_name);
+
+		silence_stdout(1);
+		struct CircuitGraph *circuit_graph = parse_qasm(filename);
+		silence_stdout(0);
+
+		if (circuit_graph == NULL)
+		{
+			printf("ERROR: Failed to read '%s'\n", filename);
+			continue;
+		}
+
+		for (int l = 0; l < N_LAYOUTS; l++)
+		{
+			int n_zones;
+			enum ZoneType *zone_types;
+			int *zone_capacities;
+			if (parse_zone_layout(layouts[l], circuit_graph->n_ions, &n_zones, &zone_types, &zone_capacities) != 0)
+				continue;
+
+			struct TrapGraph trap_graph;
+			generate_linear_trap_graph(n_zones, zone_types, zone_capacities, 0.0, (n_zones - 1) * ZONE_SPACING, ION_HEIGHT, &trap_graph);
+
+			struct TransportProgram *programs[N_STRATEGIES];
+			struct ScheduleTrace traces[N_STRATEGIES];
+			struct ScheduleResult results[N_STRATEGIES];
+
+			for (int s = 0; s < N_STRATEGIES; s++)
+			{
+				traces[s] = (struct ScheduleTrace) { 0 };
+				programs[s] = run_schedule(&trap_graph, circuit_graph, strategies[s], &traces[s]);
+
+				struct ScheduleResult *result = &results[s];
+				memset(result, 0, sizeof(*result));
+				result->scheduled = (programs[s] != NULL);
+
+				if (programs[s] != NULL)
+					evaluate_schedule(&trap_graph, circuit_graph, programs[s], &traces[s], result);
+
+				// Time the scheduler alone, without the trace
+				double run_times[MAX_RUNS];
+				int n_runs = 0;
+				double start = wall_time();
+				while (n_runs < MAX_RUNS && (n_runs < MIN_RUNS || wall_time() - start < MIN_TIME))
+				{
+					for (int z = 0; z < trap_graph.n_zones; z++)
+						trap_graph.zone_nodes[z].zone_occupancy = 0;
+
+					struct TransportProgram *transport_program = calloc(1, sizeof(struct TransportProgram));
+
+					silence_stdout(1);
+					double t0 = wall_time();
+					generate_transport_schedule_strategy(&trap_graph, circuit_graph, transport_program, strategies[s], NULL);
+					run_times[n_runs++] = wall_time() - t0;
+					silence_stdout(0);
+
+					free_transport_program(transport_program);
+				}
+
+				qsort(run_times, n_runs, sizeof(double), compare_doubles);
+				result->run_time = run_times[n_runs / 2];
+
+				int valid = result->scheduled && result->n_invalid == 0;
+				int n_rounds = (programs[s] != NULL) ? traces[s].n_rounds : 0;
+				printf("%-20s %-42s %-13s %7s %7d %12.2f %13.0f %7d %12.2f\n", circuit_name, layouts[l], strategy_names[s],
+					!result->scheduled ? "fail" : valid ? "yes" : "NO", n_rounds, 1E6 * result->makespan, result->distance, result->n_moves, 1E6 * result->run_time);
+
+				if (csv != NULL)
+					fprintf(csv, "%s,%d,%d,\"%s\",%s,%d,%d,%d,%.6f,%.3f,%d,%.6f\n", circuit_name, circuit_graph->n_ions, circuit_graph->n_instruction_nodes, layouts[l], strategy_names[s],
+						result->scheduled, result->n_invalid, n_rounds, 1E6 * result->makespan, result->distance, result->n_moves, 1E6 * result->run_time);
+			}
+
+			// The fast scheduler must make exactly the same schedule as the baseline
+			if ((programs[0] == NULL) != (programs[1] == NULL) || (programs[0] != NULL && !same_schedule(programs[0], &traces[0], programs[1], &traces[1])))
+			{
+				printf("  MISMATCH: fast and baseline schedules differ\n");
+				n_mismatches++;
+			}
+
+			// The other strategies must always make valid schedules, and layer-assign must make them no longer than the
+			// rounds alone do (lookahead places operations greedily, so it sometimes makes them a little longer)
+			for (int s = 2; s < N_STRATEGIES; s++)
+			{
+				int valid = results[s].scheduled && results[s].n_invalid == 0;
+				int slower = valid && s > 2 && results[s].makespan > results[2].makespan * (1.0 + 1E-12);
+
+				if (!valid || (slower && strategies[s] == SCHEDULE_LAYER_ASSIGN))
+				{
+					printf("  WORSE: %s is %s\n", strategy_names[s], valid ? "slower than rounds" : "invalid");
+					n_worse++;
+				}
+				else if (slower)
+					printf("  NOTE: %s is slower than rounds\n", strategy_names[s]);
+			}
+
+			for (int s = 0; s < N_STRATEGIES; s++)
+			{
+				free_transport_program(programs[s]);
+				free_schedule_trace(&traces[s]);
+			}
+
+			free_trap_graph(&trap_graph);
+			free(zone_types);
+			free(zone_capacities);
+		}
+
+		free_circuit_graph(circuit_graph);
+	}
+
+	for (int c = 0; c < n_entries; c++)
+		free(entries[c]);
+	free(entries);
+
+	if (csv != NULL)
+	{
+		fclose(csv);
+		printf("\nWrote %s\n", csv_filename);
+	}
+
+	printf("%d mismatches between the fast and baseline schedules, %d invalid schedules or schedules slower than rounds\n", n_mismatches, n_worse);
+
+	return (n_mismatches > 0 || n_worse > 0);
+}

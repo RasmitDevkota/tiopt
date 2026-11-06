@@ -25,6 +25,8 @@ int test_all_transport
 	result += test_compute_circuit_layers(atol);
 	result += test_generate_transport_schedule(atol);
 	result += test_parse_qasm_rejects_unknown_gates(atol);
+	result += test_parse_parameterized_gates(atol);
+	result += test_fast_schedule_matches_baseline(atol);
 	result += test_schedule_rounds_fit_zones(atol);
 
 	return result;
@@ -208,25 +210,84 @@ int test_generate_transport_schedule
 	return check_error("generate_transport_schedule fills transport program", n_wrong, 0);
 }
 
-int test_parse_qasm_rejects_unknown_gates
+int test_parse_parameterized_gates
 (
 	double atol
 )
 {
-	// A gate which the parser does not know would be left out of the schedule, so the circuit is rejected instead
-	char *filename = "unknown_gate_test.qasm";
+	// Rotations, phases and two-qubit interactions are read whatever their parameters
+	char *filename = "parameterized_test.qasm";
 	FILE *fp = fopen(filename, "w");
-	fprintf(fp, "// Comments, headers and declarations are skipped\nOPENQASM 3;\nqubit[2] qreg;\nbit[2] creg;\nh qreg[0];\nrz(0.5) qreg[0];\ncx qreg[0], qreg[1];\nmeasure qreg -> creg;\n");
+	fprintf(fp, "qubit[3] qreg;\nbit[3] creg;\nrz(0.5) qreg[0];\nt qreg[1];\ncp(1.570796) qreg[0], qreg[1];\nrzz(0.2) qreg[1], qreg[2];\nswap qreg[0], qreg[2];\nmeasure qreg -> creg;\n");
 	fclose(fp);
 
 	struct CircuitGraph *circuit_graph = parse_qasm(filename);
 	remove(filename);
 
-	int n_wrong = (circuit_graph != NULL);
+	int n_wrong = (circuit_graph == NULL);
 	if (circuit_graph != NULL)
-		free_circuit_graph(circuit_graph);
+	{
+		int expected_targets[6] = { 1, 1, 2, 2, 2, 3 };
+		n_wrong += (circuit_graph->n_instruction_nodes != 6);
+		for (int i = 0; i < MIN(circuit_graph->n_instruction_nodes, 6); i++)
+			n_wrong += (circuit_graph->instruction_nodes[i].n_target_ions != expected_targets[i]);
 
-	return check_error("parse_qasm rejects circuits with unknown gates", n_wrong, 0);
+		free_circuit_graph(circuit_graph);
+	}
+
+	return check_error("parse_qasm reads parameterized gates", n_wrong, 0);
+}
+
+int test_fast_schedule_matches_baseline
+(
+	double atol
+)
+{
+	enum ZoneType zone_types[7] = { LOAD_ZONE, EMPTY_ZONE, STORAGE_ZONE, EMPTY_ZONE, GATE_ZONE, EMPTY_ZONE, MEASURE_ZONE };
+	int zone_capacities[7] = { 5, 3, 10, 3, 2, 3, 4 };
+
+	struct CircuitGraph *circuit_graph = parse_qasm("quantumcircuits/test_0000.qasm");
+
+	struct TransportProgram *programs[2];
+	struct ScheduleTrace traces[2] = { { 0 }, { 0 } };
+	enum ScheduleStrategy strategies[2] = { SCHEDULE_BASELINE, SCHEDULE_FAST };
+
+	for (int s = 0; s < 2; s++)
+	{
+		struct TrapGraph trap_graph;
+		generate_linear_trap_graph(7, zone_types, zone_capacities, -150.0, 150.0, ION_HEIGHT, &trap_graph);
+
+		programs[s] = calloc(1, sizeof(struct TransportProgram));
+		if (generate_transport_schedule_strategy(&trap_graph, circuit_graph, programs[s], strategies[s], &traces[s]) == NULL)
+		{
+			free_transport_program(programs[s]);
+			programs[s] = NULL;
+		}
+
+		free_trap_graph(&trap_graph);
+	}
+
+	int n_wrong = (programs[0] == NULL) + (programs[1] == NULL);
+	if (n_wrong == 0)
+	{
+		int n = programs[0]->n_transports;
+
+		n_wrong += (traces[0].n_moves != traces[1].n_moves);
+		n_wrong += (memcmp(programs[0]->arrival_times, programs[1]->arrival_times, n * sizeof(double)) != 0);
+		n_wrong += (memcmp(programs[0]->destinations, programs[1]->destinations, n * sizeof(double[3])) != 0);
+
+		if (traces[0].n_moves == traces[1].n_moves)
+			n_wrong += (memcmp(traces[0].moves, traces[1].moves, traces[0].n_moves * sizeof(struct IonMove)) != 0);
+	}
+
+	for (int s = 0; s < 2; s++)
+	{
+		free_transport_program(programs[s]);
+		free_schedule_trace(&traces[s]);
+	}
+	free_circuit_graph(circuit_graph);
+
+	return check_error("SCHEDULE_FAST makes the same schedule as SCHEDULE_BASELINE", n_wrong, 0);
 }
 
 int test_schedule_rounds_fit_zones
@@ -234,17 +295,17 @@ int test_schedule_rounds_fit_zones
 	double atol
 )
 {
-	// The first layer has four single-qubit gates but the gate zone only holds two ions, so it runs in two rounds, with
-	// every operation finding its ions in a zone of its type and no zone over capacity
+	// The first layer has four single-qubit gates but the gate zone only holds two ions, so the strategies which split
+	// layers into rounds run it in two rounds, with every operation finding its ions in a zone of its type
 	enum ZoneType zone_types[7] = { LOAD_ZONE, EMPTY_ZONE, STORAGE_ZONE, EMPTY_ZONE, GATE_ZONE, EMPTY_ZONE, MEASURE_ZONE };
 	int zone_capacities[7] = { 5, 3, 10, 3, 2, 3, 4 };
 
 	struct CircuitGraph *circuit_graph = parse_qasm("quantumcircuits/test_0000.qasm");
 
-	enum ScheduleStrategy strategies[2] = { SCHEDULE_ROUNDS, DEFAULT_SCHEDULE_STRATEGY };
+	enum ScheduleStrategy strategies[3] = { SCHEDULE_ROUNDS, SCHEDULE_LOOKAHEAD, SCHEDULE_LAYER_ASSIGN };
 	int n_wrong = 0;
 
-	for (int s = 0; s < 2; s++)
+	for (int s = 0; s < 3; s++)
 	{
 		struct TrapGraph trap_graph;
 		generate_linear_trap_graph(7, zone_types, zone_capacities, -150.0, 150.0, ION_HEIGHT, &trap_graph);
@@ -305,4 +366,25 @@ int test_schedule_rounds_fit_zones
 	free_circuit_graph(circuit_graph);
 
 	return check_error("schedules split layers into rounds which fit in the zones", n_wrong, 0);
+}
+
+int test_parse_qasm_rejects_unknown_gates
+(
+	double atol
+)
+{
+	// A gate which the parser does not know would be left out of the schedule, so the circuit is rejected instead
+	char *filename = "unknown_gate_test.qasm";
+	FILE *fp = fopen(filename, "w");
+	fprintf(fp, "// Comments, headers and declarations are skipped\nOPENQASM 3;\nqubit[2] qreg;\nbit[2] creg;\nh qreg[0];\nu3(0.1) qreg[0];\ncx qreg[0], qreg[1];\nmeasure qreg -> creg;\n");
+	fclose(fp);
+
+	struct CircuitGraph *circuit_graph = parse_qasm(filename);
+	remove(filename);
+
+	int n_wrong = (circuit_graph != NULL);
+	if (circuit_graph != NULL)
+		free_circuit_graph(circuit_graph);
+
+	return check_error("parse_qasm rejects circuits with unknown gates", n_wrong, 0);
 }

@@ -135,6 +135,53 @@ static double operation_duration
 	return GATE_DURATION;
 }
 
+// Sort nodes by their layers (which start at 1), keeping their order within each layer, so that each layer can be
+// visited without scanning every node; allocates order (the indices of the nodes, layer by layer) and layer_starts (of
+// length n_layers + 1, where layer l takes up order[layer_starts[l-1]] to order[layer_starts[l]-1]), and returns the
+// number of layers
+int sort_layers
+(
+	int n_nodes,
+	const int *layer_idxs,
+	int **order,
+	int **layer_starts
+)
+{
+	int n_layers = 0;
+	for (int i = 0; i < n_nodes; i++)
+		n_layers = MAX(n_layers, layer_idxs[i]);
+
+	// Counting sort, which is stable
+	*layer_starts = calloc(n_layers + 1, sizeof(int));
+	for (int i = 0; i < n_nodes; i++)
+		(*layer_starts)[layer_idxs[i]]++;
+
+	for (int l = 1; l <= n_layers; l++)
+		(*layer_starts)[l] += (*layer_starts)[l - 1];
+
+	int *next = malloc((n_layers + 1) * sizeof(int));
+	memcpy(next, *layer_starts, (n_layers + 1) * sizeof(int));
+
+	*order = malloc(MAX(n_nodes, 1) * sizeof(int));
+	for (int i = 0; i < n_nodes; i++)
+		(*order)[next[layer_idxs[i] - 1]++] = i;
+
+	free(next);
+
+	return n_layers;
+}
+
+// Sort the instruction nodes of a circuit by layer (see sort_layers)
+int sort_circuit_layers
+(
+	struct CircuitGraph *circuit_graph,
+	int **order,
+	int **layer_starts
+)
+{
+	return sort_layers(circuit_graph->n_instruction_nodes, circuit_graph->layer_idxs, order, layer_starts);
+}
+
 // Schedule the arrival time of every transport of a transport program, where each layer of the circuit starts once the
 // slowest transport into it (at TRANSPORT_SPEED_LIMIT) has finished, and lasts as long as its slowest operation
 void schedule_arrival_times
@@ -162,9 +209,9 @@ void schedule_arrival_times_in_rounds
 		for (int k = 0; k < 3; k++)
 			ion_positions[i][k] = transport_program->initial_positions[i][k];
 
-	int max_layer = 0;
-	for (int i = 0; i < circuit_graph->n_instruction_nodes; i++)
-		max_layer = MAX(max_layer, rounds[i]);
+	int *order;
+	int *layer_starts;
+	int max_layer = sort_layers(circuit_graph->n_instruction_nodes, rounds, &order, &layer_starts);
 
 	double time = 0.0;
 	for (int layer = 1; layer <= max_layer; layer++)
@@ -172,10 +219,9 @@ void schedule_arrival_times_in_rounds
 		double max_distance = 0.0;
 		double max_duration = 0.0;
 
-		for (int i = 0; i < circuit_graph->n_instruction_nodes; i++)
+		for (int o = layer_starts[layer - 1]; o < layer_starts[layer]; o++)
 		{
-			if (rounds[i] != layer)
-				continue;
+			int i = order[o];
 
 			for (int t = 0; t < transport_program->transport_n_targets_list[i]; t++)
 			{
@@ -190,10 +236,9 @@ void schedule_arrival_times_in_rounds
 
 		time += max_distance / TRANSPORT_SPEED_LIMIT;
 
-		for (int i = 0; i < circuit_graph->n_instruction_nodes; i++)
+		for (int o = layer_starts[layer - 1]; o < layer_starts[layer]; o++)
 		{
-			if (rounds[i] != layer)
-				continue;
+			int i = order[o];
 
 			transport_program->arrival_times[i] = time;
 
@@ -205,6 +250,8 @@ void schedule_arrival_times_in_rounds
 		time += max_duration;
 	}
 
+	free(order);
+	free(layer_starts);
 	free(ion_positions);
 }
 
@@ -341,7 +388,11 @@ struct ZoneNode* select_operation_zone
 		if (zone->zone_occupancy - n_present + n_targets > zone->zone_capacity)
 			continue;
 
-		double distance = sqrt(pow(zone->position[0] - centroid[0], 2) + pow(zone->position[1] - centroid[1], 2) + pow(zone->position[2] - centroid[2], 2));
+		// Squared distances, which order the zones the same way
+		double dx = zone->position[0] - centroid[0];
+		double dy = zone->position[1] - centroid[1];
+		double dz = zone->position[2] - centroid[2];
+		double distance = dx * dx + dy * dy + dz * dz;
 
 		if (distance < nearest_distance)
 		{
@@ -364,7 +415,7 @@ void release_operation_zones
 	int n_ions
 )
 {
-	release_ions(trap_graph, ion_states, n_ions, NULL);
+	release_ions(trap_graph, ion_states, n_ions, NULL, NULL);
 }
 
 // Record a move of an ion in a schedule trace, if there is one
@@ -390,12 +441,14 @@ void record_ion_move
 	trace->moves[trace->n_moves++] = (struct IonMove) { ion, (int) (from - trap_graph->zone_nodes), (int) (to - trap_graph->zone_nodes), transport };
 }
 
-// As release_operation_zones, but recording the moves in trace (if it is not NULL)
+// As release_operation_zones, but leaving the ions for which keep is set (if keep is not NULL) where they are, and
+// recording the moves in trace (if it is not NULL)
 void release_ions
 (
 	struct TrapGraph *trap_graph,
 	struct ZoneNode **ion_states,
 	int n_ions,
+	const int *keep,
 	struct ScheduleTrace *trace
 )
 {
@@ -406,6 +459,9 @@ void release_ions
 		struct ZoneNode *zone = ion_states[i];
 
 		if (!(zone->zone_type & (GATE_ZONE | MEASURE_ZONE | COOL_ZONE)) || (zone->zone_type & STORAGE_ZONE))
+			continue;
+
+		if (keep != NULL && keep[i])
 			continue;
 
 		int target = i + 1;

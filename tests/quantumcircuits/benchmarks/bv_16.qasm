@@ -1,0 +1,48 @@
+// Bernstein-Vazirani with secret 111100111000111 and an ancilla, on 16 qubits
+qubit[16] qreg;
+bit[16] creg;
+
+x qreg[15];
+h qreg[0];
+h qreg[1];
+h qreg[2];
+h qreg[3];
+h qreg[4];
+h qreg[5];
+h qreg[6];
+h qreg[7];
+h qreg[8];
+h qreg[9];
+h qreg[10];
+h qreg[11];
+h qreg[12];
+h qreg[13];
+h qreg[14];
+h qreg[15];
+cx qreg[0], qreg[15];
+cx qreg[1], qreg[15];
+cx qreg[2], qreg[15];
+cx qreg[3], qreg[15];
+cx qreg[6], qreg[15];
+cx qreg[7], qreg[15];
+cx qreg[8], qreg[15];
+cx qreg[12], qreg[15];
+cx qreg[13], qreg[15];
+cx qreg[14], qreg[15];
+h qreg[0];
+h qreg[1];
+h qreg[2];
+h qreg[3];
+h qreg[4];
+h qreg[5];
+h qreg[6];
+h qreg[7];
+h qreg[8];
+h qreg[9];
+h qreg[10];
+h qreg[11];
+h qreg[12];
+h qreg[13];
+h qreg[14];
+
+measure qreg -> creg;
