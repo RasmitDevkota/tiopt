@@ -8,8 +8,6 @@
 
 #include <fftw3.h>
 
-#include <gsl/gsl_sf_legendre.h>
-
 #include "defs.h"
 #include "data_structures.h"
 #include "ti_utils.h"
@@ -1552,12 +1550,37 @@ int find_potential_minimum
 	return 1;
 }
 
-// Find the point of the RF null line (the minimum of the pseudopotential in the yz-plane) at the x-coordinate of a
-// position by Newton's method, updating its y and z coordinates in place; returns 0 on convergence
-int find_rf_null
+// Number of spheres along x (NSPH_X) which the spherical harmonics expansions need for their centers to reach from
+// x_min to x_max (µm) along the trap axis, with the other lattice parameters of this build (following the definitions
+// of TRAP_X0 and RELAXATION_NX in defs.h); wells can only be made within the expansions, so longer traps need a build
+// with more spheres. Returns -1 if no number of spheres reaches
+int required_nsph_x
+(
+	double x_min,
+	double x_max
+)
+{
+	for (int n = 1; n <= 100000; n++)
+	{
+		double trap_x0 = (n * (SPH_R_INT + SPH_R_INT / 2)) / 2;
+		double center_min = SPH_R - trap_x0;
+		double center_max = (n - 1) * SPH_SPACING + SPH_R - trap_x0;
+
+		if (center_min <= x_min && center_max >= x_max)
+			return n;
+	}
+
+	return -1;
+}
+
+// Find the point of the RF null line (the minimum of the pseudopotential in the plane across a direction in the trap
+// surface, such as the axis of an arm) through a position by Newton's method, moving the position within that plane;
+// returns 0 on convergence
+int find_rf_null_across
 (
 	struct Trap *trap,
 	double (*position)[3],
+	double direction[3],
 	int max_iterations
 )
 {
@@ -1566,6 +1589,16 @@ int find_rf_null
 		printf("ERROR: Trap has no RF electrodes, so it has no RF null\n");
 		return 1;
 	}
+
+	// The plane is spanned by the horizontal direction across the given one, u, and the vertical
+	double norm = sqrt(direction[0]*direction[0] + direction[1]*direction[1]);
+	if (norm <= 0.0)
+	{
+		printf("ERROR: The direction across which to find the RF null must lie in the trap surface\n");
+		return 1;
+	}
+
+	double u[3] = { -direction[1] / norm, direction[0] / norm, 0.0 };
 
 	// The location of the null does not depend on the drive or on the ion, so use unit values to keep numbers moderate
 	struct Trap rf_trap = *trap;
@@ -1577,30 +1610,81 @@ int find_rf_null
 
 	for (int it = 0; it < max_iterations; it++)
 	{
+		double U;
 		double grad_U[3];
 		double H_U[3][3];
-		evaluate_pseudopotential(&rf_trap, 1.0, 1.0, *position, NULL, grad_U, H_U);
+		evaluate_pseudopotential(&rf_trap, 1.0, 1.0, *position, &U, grad_U, H_U);
 
-		double det = H_U[1][1] * H_U[2][2] - H_U[1][2] * H_U[2][1];
+		// Gradient and Hessian within the plane
+		double g_u = u[0] * grad_U[0] + u[1] * grad_U[1];
+		double g_z = grad_U[2];
+		double H_uu = u[0] * (H_U[0][0] * u[0] + H_U[0][1] * u[1]) + u[1] * (H_U[1][0] * u[0] + H_U[1][1] * u[1]);
+		double H_uz = u[0] * H_U[0][2] + u[1] * H_U[1][2];
+		double H_zz = H_U[2][2];
 
-		if (fabs(det) < 1E-300)
+		double det = H_uu * H_zz - H_uz * H_uz;
+
+		if (fabs(det) < 1E-300 && hypot(g_u, g_z) < 1E-300)
 		{
 			printf("ERROR: Pseudopotential has a singular Hessian at (%f, %f, %f)\n", (*position)[0], (*position)[1], (*position)[2]);
 			return 1;
 		}
 
-		double step_y = -(H_U[2][2] * grad_U[1] - H_U[1][2] * grad_U[2]) / det;
-		double step_z = -(H_U[1][1] * grad_U[2] - H_U[2][1] * grad_U[1]) / det;
+		// Newton's method heads for the nearest stationary point, so where the pseudopotential is not convex (such as
+		// near the barriers of a junction) step downhill instead, until it reaches a minimum
+		double step_u;
+		double step_z;
+		if (det > 0.0 && H_uu > 0.0)
+		{
+			step_u = -(H_zz * g_u - H_uz * g_z) / det;
+			step_z = -(H_uu * g_z - H_uz * g_u) / det;
+		}
+		else
+		{
+			step_u = -max_step * g_u / hypot(g_u, g_z);
+			step_z = -max_step * g_z / hypot(g_u, g_z);
+		}
 
-		double step_norm = sqrt(step_y*step_y + step_z*step_z);
+		double step_norm = sqrt(step_u*step_u + step_z*step_z);
 		double step_scale = (step_norm > max_step) ? max_step / step_norm : 1.0;
 
-		(*position)[1] += step_scale * step_y;
-		(*position)[2] += step_scale * step_z;
+		// Shorten the step until the pseudopotential falls, so that the search cannot overshoot and cycle
+		double trial[3];
+		for (int halving = 0; halving < 40; halving++)
+		{
+			trial[0] = (*position)[0] + step_scale * step_u * u[0];
+			trial[1] = (*position)[1] + step_scale * step_u * u[1];
+			trial[2] = (*position)[2] + step_scale * step_z;
 
-		if (step_norm < 1E-9)
+			double U_trial;
+			evaluate_pseudopotential(&rf_trap, 1.0, 1.0, trial, &U_trial, NULL, NULL);
+
+			if (U_trial <= U)
+				break;
+
+			step_scale *= 0.5;
+		}
+
+		for (int k = 0; k < 3; k++)
+			(*position)[k] = trial[k];
+
+		if (step_scale * step_norm < 1E-9)
 			return 0;
 	}
 
 	return 1;
+}
+
+// Find the point of the RF null line (the minimum of the pseudopotential in the yz-plane) at the x-coordinate of a
+// position by Newton's method, updating its y and z coordinates in place; returns 0 on convergence
+int find_rf_null
+(
+	struct Trap *trap,
+	double (*position)[3],
+	int max_iterations
+)
+{
+	double x_axis[3] = { 1.0, 0.0, 0.0 };
+
+	return find_rf_null_across(trap, position, x_axis, max_iterations);
 }

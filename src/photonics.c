@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <string.h>
 #include <math.h>
 #include <complex.h>
 
@@ -222,6 +223,86 @@ int design_grating_coupler
 	double sin_theta = rho / grating->focal_distance;
 
 	grating->period = grating->waveguide.wavelength / (n_eff - sin_theta);
+
+	return 0;
+}
+
+// Vacuum wavelengths (µm) of the beams of enum PhotonicsBeam for each species, or 0 for beams the species does not use
+struct SpeciesBeams
+{
+	const char *element;
+	double wavelengths[N_PHOTONICS_BEAMS];
+};
+
+static const struct SpeciesBeams species_beams[] =
+{
+	// 729 nm S1/2-D5/2 qubit, 397 nm S1/2-P1/2 detection, 866 nm D3/2-P1/2 repump, 854 nm D5/2-P3/2 quench, and 423 nm
+	// and 375 nm photoionization of neutral calcium
+	{ "40Ca+", { 0.729347, 0.396959, 0.866452, 0.854444, 0.422792, 0.375 } },
+	// 674 nm qubit, 422 nm detection, 1092 nm repump, 1033 nm quench, and 461 nm and 405 nm photoionization
+	{ "88Sr+", { 0.674025, 0.421671, 1.091787, 1.033014, 0.460862, 0.405 } },
+	// 411 nm S1/2-D5/2 qubit, 370 nm detection, 935 nm repump, 976 nm quench of the D5/2 state, and 399 nm
+	// photoionization followed by the 370 nm light
+	{ "171Yb+", { 0.411042, 0.369525, 0.935188, 0.976, 0.398911, 0.369525 } },
+	// 313 nm Raman beams for the hyperfine qubit, 313 nm detection on the S1/2-P3/2 transition and repump on the
+	// S1/2-P1/2 transition, and photoionization by two photons of 235 nm (from the same beam)
+	{ "9Be+", { 0.313, 0.313132, 0.313197, 0.0, 0.234933, 0.0 } },
+};
+
+// Light which the integrated photonics deliver for a beam of enum PhotonicsBeam and a species: its vacuum wavelength,
+// a single-mode waveguide which guides it (silicon nitride for visible and infrared light, and alumina for ultraviolet
+// light, which silicon nitride absorbs, both in silica cladding; dimensions in µm), and a typical power (W). Returns 1
+// if the species is unknown or does not use the beam
+int get_photonics_beam
+(
+	const char *element,
+	enum PhotonicsBeam beam,
+	struct Waveguide *waveguide,
+	double *power
+)
+{
+	int n_species = sizeof(species_beams) / sizeof(species_beams[0]);
+
+	double wavelength = 0.0;
+	for (int i = 0; i < n_species; i++)
+		if (element != NULL && strcmp(element, species_beams[i].element) == 0 && beam >= 0 && beam < N_PHOTONICS_BEAMS)
+			wavelength = species_beams[i].wavelengths[beam];
+
+	if (wavelength <= 0.0)
+		return 1;
+
+	waveguide->wavelength = wavelength;
+	waveguide->n_cladding = 1.455;
+	waveguide->n_eff = 0.0;
+
+	if (wavelength < 0.3)
+	{
+		waveguide->n_core = 1.7;
+		waveguide->thickness = 0.1;
+		waveguide->width = 0.4;
+	}
+	else if (wavelength < 0.45)
+	{
+		waveguide->n_core = 1.65;
+		waveguide->thickness = 0.15;
+		waveguide->width = 0.6;
+	}
+	else if (wavelength < 0.8)
+	{
+		waveguide->n_core = 2.0;
+		waveguide->thickness = 0.15;
+		waveguide->width = 0.6;
+	}
+	else
+	{
+		waveguide->n_core = 2.0;
+		waveguide->thickness = (wavelength < 1.0) ? 0.2 : 0.25;
+		waveguide->width = (wavelength < 1.0) ? 0.8 : 1.0;
+	}
+
+	// Enough power for fast gates on the qubit, and well below saturation for detection
+	double powers[N_PHOTONICS_BEAMS] = { 1E-3, 1E-5, 1E-4, 1E-4, 1E-5, 1E-4 };
+	*power = powers[beam];
 
 	return 0;
 }

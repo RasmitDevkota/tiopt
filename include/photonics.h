@@ -44,6 +44,14 @@ int design_grating_coupler
 	double target[3]
 );
 
+int get_photonics_beam
+(
+	const char *element,
+	enum PhotonicsBeam beam,
+	struct Waveguide *waveguide,
+	double *power
+);
+
 void compute_gaussian_beam
 (
 	double waist_aperture,

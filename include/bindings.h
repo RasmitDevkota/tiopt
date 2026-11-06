@@ -92,3 +92,8 @@ void get_codesign_layout
 	int *n_layers,
 	int *n_ions
 );
+
+const char* get_codesign_zone_layout
+(
+	struct Codesign *codesign
+);

@@ -128,6 +128,12 @@
 #define COOLING_DURATION 5E-4
 #endif
 
+// Co-design defaults: ions are loaded into and wait in the first zone, and gates and detection happen in the gate and
+// measurement zones, with empty zones in between to keep the wells apart
+#ifndef DEFAULT_CODESIGN_LAYOUT
+#define DEFAULT_CODESIGN_LAYOUT "load+storage, empty, gate, empty, measure"
+#endif
+
 // Quantum dynamics defaults
 #ifndef QUANTUM_STEP_FACTOR
 #define QUANTUM_STEP_FACTOR 0.02 // the first adaptive step is this fraction of the fastest timescale

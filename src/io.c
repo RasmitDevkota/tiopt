@@ -7,6 +7,10 @@
 #include "defs.h"
 #include "data_structures.h"
 #include "traps.h"
+#include "zones.h"
+
+// Names of the beams of enum PhotonicsBeam in trap files
+static const char *beam_names[N_PHOTONICS_BEAMS] = { "qubit", "detection", "repump", "quench", "photoionization", "ionization" };
 
 // Check that an index read from the trap file lies within [0, n)
 static int check_index
@@ -143,6 +147,20 @@ int generate_trap_from_file(
 
 				allocate_detectors(trap, n_detectors);
 			}
+			else if (strcmp(parameter, "n_zones") == 0)
+			{
+				int n_zones = 0;
+				sscanf(line, "trap n_zones %d", &n_zones);
+
+				if (n_zones < 0 || trap->zones != NULL)
+				{
+					printf("ERROR: Invalid or repeated number of zones on line %d of trap file\n", line_num);
+					status = 1;
+					continue;
+				}
+
+				allocate_zones(trap, n_zones);
+			}
 			else
 			{
 				printf("ERROR: Invalid trap parameter '%s' detected in trap file\n", parameter);
@@ -273,6 +291,27 @@ int generate_trap_from_file(
 					&grating->position[2]
 				);
 			}
+			else if (strcmp(parameter, "beam") == 0)
+			{
+				char beam_name[31+1];
+				beam_name[0] = '\0';
+				sscanf(line, "grating beam %*d %31s", beam_name);
+
+				grating->beam = -1;
+				for (int b = 0; b < N_PHOTONICS_BEAMS; b++)
+					if (strcmp(beam_name, beam_names[b]) == 0)
+						grating->beam = b;
+
+				if (grating->beam < 0 && strcmp(beam_name, "none") != 0)
+				{
+					printf("ERROR: Invalid beam '%s' on line %d of trap file\n", beam_name, line_num);
+					status = 1;
+				}
+			}
+			else if (strcmp(parameter, "zone") == 0)
+			{
+				sscanf(line, "grating zone %*d %d", &grating->zone);
+			}
 			else if (!found)
 			{
 				printf("ERROR: Invalid grating parameter '%s' detected in trap file\n", parameter);
@@ -318,9 +357,62 @@ int generate_trap_from_file(
 					&detector->position[2]
 				);
 			}
+			else if (strcmp(parameter, "zone") == 0)
+			{
+				sscanf(line, "detector zone %*d %d", &detector->zone);
+			}
 			else if (!found)
 			{
 				printf("ERROR: Invalid detector parameter '%s' detected in trap file\n", parameter);
+				status = 1;
+			}
+		}
+		else if (strcmp(target, "zone") == 0)
+		{
+			char parameter[19+1];
+			parameter[0] = '\0';
+			sscanf(line, "zone %19s", parameter);
+
+			int zone_num = -1;
+			sscanf(line, "zone %*s %d", &zone_num);
+
+			if (check_index("Zone", zone_num, trap->n_zones))
+			{
+				status = 1;
+				continue;
+			}
+
+			struct ZoneNode *zone = &(*trap->zones)[zone_num];
+
+			if (strcmp(parameter, "type") == 0)
+			{
+				char types[63+1];
+				types[0] = '\0';
+				sscanf(line, "zone type %*d %63s", types);
+
+				if (parse_zone_types(types, &zone->zone_type) != 0)
+				{
+					printf("ERROR: Invalid zone type on line %d of trap file\n", line_num);
+					status = 1;
+				}
+			}
+			else if (strcmp(parameter, "capacity") == 0)
+			{
+				sscanf(line, "zone capacity %*d %d", &zone->zone_capacity);
+			}
+			else if (strcmp(parameter, "position") == 0)
+			{
+				sscanf(
+					line,
+					"zone position %*d (%lf %lf %lf)",
+					&zone->position[0],
+					&zone->position[1],
+					&zone->position[2]
+				);
+			}
+			else
+			{
+				printf("ERROR: Invalid zone parameter '%s' detected in trap file\n", parameter);
 				status = 1;
 			}
 		}
@@ -424,6 +516,8 @@ int write_trap_to_file
 		fprintf(trap_fptr, "grating waveguide_thickness %d %.17g\n", g, grating->waveguide.thickness);
 		fprintf(trap_fptr, "grating n_core %d %.17g\n", g, grating->waveguide.n_core);
 		fprintf(trap_fptr, "grating n_cladding %d %.17g\n", g, grating->waveguide.n_cladding);
+		fprintf(trap_fptr, "grating beam %d %s\n", g, (grating->beam >= 0 && grating->beam < N_PHOTONICS_BEAMS) ? beam_names[grating->beam] : "none");
+		fprintf(trap_fptr, "grating zone %d %d\n", g, grating->zone);
 	}
 
 	if (trap->n_detectors > 0)
@@ -443,6 +537,26 @@ int write_trap_to_file
 		fprintf(trap_fptr, "detector wavelength %d %.17g\n", d, detector->wavelength);
 		fprintf(trap_fptr, "detector quantum_efficiency %d %.17g\n", d, detector->quantum_efficiency);
 		fprintf(trap_fptr, "detector dark_count_rate %d %.17g\n", d, detector->dark_count_rate);
+		fprintf(trap_fptr, "detector zone %d %d\n", d, detector->zone);
+	}
+
+	if (trap->n_zones > 0)
+	{
+		fprintf(trap_fptr, "\n");
+		fprintf(trap_fptr, "trap n_zones %d\n", trap->n_zones);
+	}
+
+	for (int z = 0; z < trap->n_zones; z++)
+	{
+		struct ZoneNode *zone = &(*trap->zones)[z];
+
+		char types[64];
+		format_zone_types(zone->zone_type, types, sizeof(types));
+
+		fprintf(trap_fptr, "\n");
+		fprintf(trap_fptr, "zone type %d %s\n", z, types);
+		fprintf(trap_fptr, "zone capacity %d %d\n", z, zone->zone_capacity);
+		fprintf(trap_fptr, "zone position %d (%.17g %.17g %.17g)\n", z, zone->position[0], zone->position[1], zone->position[2]);
 	}
 
 	fclose(trap_fptr);

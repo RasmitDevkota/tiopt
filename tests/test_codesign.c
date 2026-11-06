@@ -32,7 +32,7 @@ int test_create_codesign
 	double atol
 )
 {
-	struct Codesign *codesign = create_codesign("40Ca+", bell_filename, NULL, NULL);
+	struct Codesign *codesign = create_codesign("40Ca+", bell_filename, NULL, NULL, NULL);
 
 	if (codesign == NULL)
 		return check_error("create_codesign reads Bell circuit", HUGE_VAL, 0.0);
@@ -84,7 +84,7 @@ int test_codesign_flow
 	double atol
 )
 {
-	struct Codesign *codesign = create_codesign("40Ca+", bell_filename, NULL, NULL);
+	struct Codesign *codesign = create_codesign("40Ca+", bell_filename, NULL, NULL, NULL);
 
 	if (codesign == NULL)
 		return check_error("create_codesign reads Bell circuit", HUGE_VAL, 0.0);

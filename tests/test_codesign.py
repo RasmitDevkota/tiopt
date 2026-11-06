@@ -52,7 +52,9 @@ def test_qc_aware_stage_does_not_worsen_design(codesign):
 
 def test_codesign_trap_is_usable(codesign, ion):
     trap = codesign.trap()
-    assert len(trap.grating_couplers()) == 4 and len(trap.detectors()) == 1
+    # The loading zone of the default layout also gets photoionization and cooling beams
+    assert len(trap.grating_couplers()) == 8 and len(trap.detectors()) == 1
+    assert [zone.types for zone in trap.zones()] == ["load+storage", "empty", "gate", "empty", "measure"]
     null = trap.find_rf_null((codesign.layout()["gate_position"][0], 0.0, None))
     assert trap.trap_depth(ion, null) > 0
 

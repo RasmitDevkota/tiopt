@@ -8,7 +8,9 @@ rad/s, masses are in kg, charges are in C, and energies are in J, unless stated 
 
 import ctypes as C
 import ctypes.util
+import math
 import os
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -20,10 +22,10 @@ import numpy as np
 
 
 def library_path():
-    """Find libtiopt.so, which is at $TIOPT_LIBRARY if it is set and in the root of the repository otherwise."""
+    """Find libtiopt.so, which is at $TIOPT_LIBRARY if it is set and in the build directory of the repository otherwise."""
     if os.environ.get("TIOPT_LIBRARY"):
         return Path(os.environ["TIOPT_LIBRARY"])
-    return Path(__file__).resolve().parents[2] / "libtiopt.so"
+    return Path(__file__).resolve().parents[2] / "build" / "libtiopt.so"
 
 
 def _load_library():
@@ -138,6 +140,8 @@ class GratingCouplerStruct(C.Structure):
         ("focal_distance", C.c_double),
         ("power", C.c_double),
         ("efficiency", C.c_double),
+        ("beam", C.c_int),
+        ("zone", C.c_int),
     ]
 
 
@@ -150,6 +154,7 @@ class DetectorStruct(C.Structure):
         ("wavelength", C.c_double),
         ("quantum_efficiency", C.c_double),
         ("dark_count_rate", C.c_double),
+        ("zone", C.c_int),
     ]
 
 
@@ -168,6 +173,8 @@ class TrapStruct(C.Structure):
         ("grating_couplers", C.POINTER(GratingCouplerStruct)),
         ("n_detectors", C.c_int),
         ("detectors", C.POINTER(DetectorStruct)),
+        ("n_zones", C.c_int),
+        ("zones", C.POINTER(ZoneNode)),
     ]
 
 
@@ -335,10 +342,24 @@ STRUCTURES = {
 # Enumerations
 RELAXATION, ANALYTICAL, SPECTRAL = 0, 1, 2
 LINEAR_SURFACE_TRAP, LINEAR_SURFACE_TRAP_WITH_GRATINGS, LINEAR_SURFACE_TRAP_WITH_PHOTONICS = 0, 1, 2
+X_JUNCTION_TRAP, Y_JUNCTION_TRAP, T_JUNCTION_TRAP, POINT_TRAP = 3, 4, 5, 6
 CPU_DEVICE, OPENCL_DEVICE = 0, 1
 
-# Grating couplers added by Trap.add_photonics, in order (enum PhotonicsBeam)
-PHOTONICS_BEAMS = ("qubit", "detection", "repump", "quench")
+# Trap presets of Trap.from_preset (enum TrapPreset); the linear presets also come with gratings or photonics
+TRAP_PRESETS = {
+    "linear": LINEAR_SURFACE_TRAP,
+    "x_junction": X_JUNCTION_TRAP,
+    "y_junction": Y_JUNCTION_TRAP,
+    "t_junction": T_JUNCTION_TRAP,
+    "point": POINT_TRAP,
+}
+
+# Zone layout of the co-design flow when none is given (DEFAULT_CODESIGN_LAYOUT in defs.h): ions are loaded into and wait
+# in the first zone, and gates and detection happen in the gate and measurement zones, with empty zones in between
+DEFAULT_LAYOUT = "load+storage, empty, gate, empty, measure"
+
+# Beams of the integrated photonics, by the transition they drive (enum PhotonicsBeam)
+PHOTONICS_BEAMS = ("qubit", "detection", "repump", "quench", "photoionization", "ionization")
 
 # Stages of the co-design flow (enum CodesignStage)
 CODESIGN_STAGES = ("basic design", "trap", "photonics", "transport", "waveforms", "metrics")
@@ -392,6 +413,7 @@ _prototype("get_codesign_state", None, _codesign_p, C.POINTER(CodesignParameters
 _prototype("set_codesign_state", None, _codesign_p, C.POINTER(CodesignParametersStruct), C.POINTER(CodesignEnvironmentStruct))
 _prototype("get_codesign_trap", _trap_p, _codesign_p)
 _prototype("get_codesign_layout", None, _codesign_p, _double_p, _double_p, _int_p, _int_p, _int_p)
+_prototype("get_codesign_zone_layout", C.c_char_p, _codesign_p)
 
 # acceleration.h
 _prototype("set_num_threads", None, C.c_int)
@@ -405,7 +427,7 @@ _prototype("release_opencl", None)
 # codesign.h
 _prototype("default_codesign_parameters", None, C.POINTER(CodesignParametersStruct))
 _prototype("default_codesign_environment", None, C.POINTER(CodesignEnvironmentStruct))
-_prototype("create_codesign", _codesign_p, C.c_char_p, C.c_char_p, C.POINTER(CodesignEnvironmentStruct), C.POINTER(CodesignParametersStruct))
+_prototype("create_codesign", _codesign_p, C.c_char_p, C.c_char_p, C.c_char_p, C.POINTER(CodesignEnvironmentStruct), C.POINTER(CodesignParametersStruct))
 _prototype("free_codesign", None, _codesign_p)
 _prototype("evaluate_codesign", C.c_int, _codesign_p, C.c_int, C.POINTER(QCMetricsStruct))
 _prototype("optimize_codesign_stage", C.c_int, _codesign_p, C.c_int, C.c_int, C.c_int, _double_p, _int_p)
@@ -424,6 +446,8 @@ _prototype("evaluate_potential_energy", C.c_int, _trap_p, _c, _c, _double_p, _do
 _prototype("compute_normal_modes", C.c_int, _trap_p, _c, _c, _double_p, _double_p, _double_p, _double_p)
 _prototype("find_potential_minimum", C.c_int, _trap_p, _c, _c, _double_p, _double_p, C.c_int)
 _prototype("find_rf_null", C.c_int, _trap_p, _double_p, C.c_int)
+_prototype("find_rf_null_across", C.c_int, _trap_p, _double_p, _double_p, C.c_int)
+_prototype("required_nsph_x", C.c_int, _c, _c)
 
 # traps.h, io.h, ions.h
 _prototype("generate_trap_from_preset", C.c_int, C.c_int, C.c_int, _c, _trap_p)
@@ -431,6 +455,9 @@ _prototype("allocate_trap", None, _trap_p, C.c_int)
 _prototype("allocate_grating_couplers", None, _trap_p, C.c_int)
 _prototype("allocate_detectors", None, _trap_p, C.c_int)
 _prototype("add_trap_photonics", C.c_int, _trap_p, _double_p, _double_p)
+_prototype("add_zone_photonics", C.c_int, _trap_p, C.c_char_p)
+_prototype("generate_junction_trap", C.c_int, C.c_int, _double_p, C.c_int, _c, _trap_p)
+_prototype("generate_trap_from_layout", C.c_int, C.c_char_p, C.c_int, _c, _c, C.c_char_p, C.c_int, _trap_p)
 _prototype("set_polygon_electrode", None, _trap_p, C.c_int, C.c_int, _double_p, _double_p)
 _prototype("set_rectangular_electrode", None, _trap_p, C.c_int, _c, _c, _c, _c)
 _prototype("free_trap", None, _trap_p)
@@ -464,6 +491,7 @@ _prototype("heating_rate_field_noise", _c, _c, _c, _c, _c)
 _prototype("heating_rate_voltage_noise", _c, _trap_p, _c, _c, _double_p, _c, _double_p, _c)
 _prototype("motional_quanta", _c, _c, _c, _double_p, _double_p, _double_p, _double_p)
 _prototype("compute_trap_depth", _c, _trap_p, _c, _c, _double_p)
+_prototype("compute_rf_null_path", _c, _trap_p, _c, _c, C.c_int, _double_p, C.c_int, _double_p, _double_p)
 
 # experiments.h
 _prototype("run_experiment", None, _trap_p, _ion_p, C.c_int, _double_p)
@@ -474,6 +502,7 @@ _prototype("solve_waveguide_mode", C.c_int, _waveguide_p)
 _prototype("compute_grating_effective_index", C.c_int, _grating_p, _double_p)
 _prototype("compute_grating_emission", C.c_int, _grating_p, _double_p, _double_p)
 _prototype("design_grating_coupler", C.c_int, _grating_p, _double_p)
+_prototype("get_photonics_beam", C.c_int, C.c_char_p, C.c_int, _waveguide_p, _double_p)
 _prototype("compute_gaussian_beam", None, _c, _c, _c, _double_p, _double_p)
 _prototype("evaluate_grating_beam", C.c_int, _grating_p, _double_p, _double_p, _double_p)
 _prototype("compute_collection_efficiency", _c, C.POINTER(DetectorStruct), _double_p)
@@ -503,6 +532,16 @@ _prototype("generate_linear_trap_graph", None, C.c_int, _int_p, _int_p, _c, _c, 
 _prototype("free_trap_graph", None, C.POINTER(TrapGraphStruct))
 _prototype("free_circuit_graph", None, C.POINTER(CircuitGraphStruct))
 _prototype("free_transport_program", None, C.POINTER(TransportProgramStruct))
+
+# zones.h
+_prototype("parse_zone_types", C.c_int, C.c_char_p, _int_p)
+_prototype("format_zone_types", None, C.c_int, C.c_char_p, C.c_int)
+_prototype("default_zone_capacity", C.c_int, C.c_int, C.c_int)
+_prototype("parse_zone_layout", C.c_int, C.c_char_p, C.c_int, _int_p, C.POINTER(_int_p), C.POINTER(_int_p))
+_prototype("allocate_zones", None, _trap_p, C.c_int)
+_prototype("set_trap_zone", None, _trap_p, C.c_int, C.c_int, C.c_int, _double_p)
+_prototype("set_layout_zones", C.c_int, _trap_p, C.c_char_p, C.c_int, _c)
+_prototype("generate_trap_graph_from_zones", None, _trap_p, C.POINTER(TrapGraphStruct))
 
 # ion_heating/ion_heating.h
 _prototype("ion_spectrum_opts_default", None, C.POINTER(SpectrumOptions))
@@ -617,8 +656,116 @@ class Ion:
 # ---------------------------------------------------------------------------------------------------------------------
 
 
+@dataclass
+class Zone:
+    """Zone of a trap where ions are loaded, stored, gated, measured, etc.
+
+    The types are joined by "+" (e.g. "load+storage"), the capacity is the number of ions the zone holds, and the
+    position is the point where the zone's ions sit (µm).
+    """
+
+    types: str
+    capacity: int
+    position: np.ndarray
+
+
+def _format_zone_type(value):
+    buffer = C.create_string_buffer(128)
+    _lib.format_zone_types(int(value), buffer, len(buffer))
+    return buffer.value.decode()
+
+
+def _zone_type(name):
+    value = C.c_int()
+    if _lib.parse_zone_types(name.encode(), C.byref(value)) != 0:
+        flush_c_output()
+        raise ValueError(f"unknown zone type in {name!r}; choose from {', '.join(k.lower() for k in ZONE_TYPES)}")
+    return value.value
+
+
+def parse_layout(layout, n_ions=0):
+    """Parse a zone layout into the types and capacity of every zone, in order along the trap.
+
+    The layout lists entries separated by commas, each with zone types joined by "+", an optional capacity after ":"
+    and an optional count after "x", e.g. "load+storage, empty, gate:2 x5, empty, measure".
+
+    Args:
+        layout: Zone layout.
+        n_ions: Number of ions which load, storage, and measurement zones hold when the layout gives no capacity (0 for
+            a default).
+
+    Returns:
+        List of (types, capacity) for every zone
+    """
+    n_zones = C.c_int()
+    types = _int_p()
+    capacities = _int_p()
+    if _lib.parse_zone_layout(layout.encode(), int(n_ions), C.byref(n_zones), C.byref(types), C.byref(capacities)) != 0:
+        flush_c_output()
+        raise ValueError(f"failed to parse zone layout {layout!r}; entries look like 'load+storage', 'gate:2' or 'gate x5', separated by commas")
+    zones = [(_format_zone_type(types[z]), capacities[z]) for z in range(n_zones.value)]
+    _libc.free(C.cast(types, C.c_void_p))
+    _libc.free(C.cast(capacities, C.c_void_p))
+    return zones
+
+
+def expansion_region():
+    """Get the region where wells can be made, which the centers of the spherical harmonics expansions span (µm).
+
+    Returns:
+        Smallest and largest x, and smallest and largest y
+    """
+    return (constant("SPH_CENTER_X_MIN"), constant("SPH_CENTER_X_MAX"), constant("SPH_CENTER_Y_MIN"), constant("SPH_CENTER_Y_MAX"))
+
+
+def required_nsph_x(x_min, x_max):
+    """Compute the number of spheres along x (NSPH_X) which a build needs to make wells from x_min to x_max (µm)."""
+    return _lib.required_nsph_x(float(x_min), float(x_max))
+
+
+def photonics_beam(element, beam):
+    """Get the light which the integrated photonics deliver for a beam of PHOTONICS_BEAMS and a species.
+
+    Args:
+        element: Ion species (see Ion.PRESETS).
+        beam: Name of the beam (see PHOTONICS_BEAMS).
+
+    Returns:
+        Waveguide which guides the light (with its vacuum wavelength) and a typical power (W), or None if the species
+        does not use the beam
+    """
+    struct = WaveguideStruct()
+    power = C.c_double()
+    if _lib.get_photonics_beam(element.encode(), PHOTONICS_BEAMS.index(beam), C.byref(struct), C.byref(power)) != 0:
+        return None
+    return Waveguide(struct.wavelength, struct.width, struct.thickness, struct.n_core, struct.n_cladding), power.value
+
+
+def format_design_report(report):
+    """Format a design report (see Trap.design_report) as text, with a paragraph for each zone."""
+    lines = []
+    for entry in report:
+        position = entry["position"]
+        lines.append(f"Zone {entry['zone']} ({entry['types']}) at ({position[0]:.1f}, {position[1]:.1f}) µm")
+        if entry.get("outside_expansions"):
+            lines.append(f"  outside the spherical harmonics expansions; rebuild with make clean && make DEFINES=\"-DNSPH_X={entry['required_nsph_x']}\" to reach it")
+            continue
+        null = entry["rf_null"]
+        frequencies = ", ".join(f"{w / (2 * np.pi * 1e6):.2f}" for w in entry["secular_frequencies"])
+        lines.append(f"  RF null at ({null[0]:.1f}, {null[1]:.1f}, {null[2]:.1f}) µm, pseudopotential {entry['pseudopotential'] * 1e3:.3f} meV")
+        lines.append(f"  pseudopotential frequencies 2π × ({frequencies}) MHz, Mathieu q {entry['mathieu_q']:.3f}, depth {entry['trap_depth'] * 1e3:.1f} meV")
+        for name, beam in entry["beams"].items():
+            text = f"  {name} beam ({beam['wavelength'] * 1e3:.0f} nm): {beam['intensity']:.3g} W/m²"
+            if "rabi_frequency" in beam:
+                text += f", Rabi frequency 2π × {beam['rabi_frequency'] / (2 * np.pi * 1e3):.1f} kHz, Lamb-Dicke parameter {beam['lamb_dicke_parameter']:.3f}, crosstalk {beam['crosstalk']:.2e}"
+            lines.append(text)
+        if "detection_fidelity" in entry:
+            lines.append(f"  detection fidelity {entry['detection_fidelity']:.6f} (collecting {entry['collection_efficiency'] * 100:.2f}% of the light)")
+    return "\n".join(lines)
+
+
 class Trap:
-    """Surface trap, including its electrodes, RF drive, integrated photonics, and solved electrodynamics."""
+    """Surface trap, including its electrodes, RF drive, integrated photonics, zones, and solved electrodynamics."""
 
     def __init__(self):
         self.struct = TrapStruct()
@@ -626,29 +773,96 @@ class Trap:
         self.solver = None
 
     @classmethod
-    def from_preset(cls, n_segments=7, segment_width=50.0, gratings=False, photonics=False):
-        """Generate the five-wire linear surface trap preset (see generate_trap_from_preset).
+    def from_preset(cls, n_segments=7, segment_width=50.0, gratings=False, photonics=False, preset="linear"):
+        """Generate a trap from the preset library (see generate_trap_from_preset).
 
-        The RF null of the preset is at ION_HEIGHT above the center of the trap.
+        The presets are a five-wire linear surface trap ("linear"), junctions with four arms at right angles
+        ("x_junction"), three arms 120 degrees apart ("y_junction") or a third arm at right angles to a straight trap
+        ("t_junction"), and a point trap which holds one ion above a ring of RF ("point"). Their RF nulls are at
+        ION_HEIGHT above the trap surface.
 
         Args:
-            n_segments: Number of DC segments on each side of the trap.
-            segment_width: Width of each DC segment along the trap axis (µm).
-            gratings: Specifies whether to add a 729 nm grating coupler which addresses the center of the trap.
-            photonics: Specifies whether to add the full integrated photonics of Trap.add_photonics, with the gate zone
-                at the center of the trap and the measurement zone two segments along.
+            n_segments: Number of DC segments on each side of the linear trap or of every arm of a junction, or the
+                number of compensation electrodes around the point trap.
+            segment_width: Width of each DC segment (µm), or the width of the ring of compensation electrodes of the
+                point trap.
+            gratings: Specifies whether to add a 729 nm grating coupler which addresses the center of the linear trap.
+            photonics: Specifies whether to add integrated photonics for 40Ca+, with a gate zone at the center of the
+                linear trap and a measurement zone two segments along (see Trap.add_photonics), or for the zones of
+                the other presets (see Trap.add_zone_photonics).
+            preset: Name of the preset (see TRAP_PRESETS).
+
+        Returns:
+            New trap
+        """
+        if preset not in TRAP_PRESETS:
+            raise ValueError(f"unknown trap preset {preset!r}; choose from {tuple(TRAP_PRESETS)}")
+        if gratings and preset != "linear":
+            raise ValueError("only the linear preset comes with a single grating coupler; use photonics=True instead")
+        trap = cls()
+        code = TRAP_PRESETS[preset]
+        if preset == "linear" and gratings:
+            code = LINEAR_SURFACE_TRAP_WITH_GRATINGS
+        if preset == "linear" and photonics:
+            code = LINEAR_SURFACE_TRAP_WITH_PHOTONICS
+        status = _lib.generate_trap_from_preset(code, int(n_segments), float(segment_width), C.byref(trap.struct))
+        flush_c_output()
+        if status != 0:
+            raise TiOptError(f"failed to generate the {preset} trap preset")
+        if photonics and preset != "linear":
+            trap.add_zone_photonics("40Ca+")
+        return trap
+
+    @classmethod
+    def junction(cls, arm_angles, n_segments=2, segment_width=40.0):
+        """Generate a surface trap junction of five-wire arms (see generate_junction_trap).
+
+        The rails of neighboring arms join into one RF electrode for each gap between the arms, and their DC electrodes
+        meet along the bisector of the gap. The junction gets a junction zone at its center.
+
+        Args:
+            arm_angles: Direction of each arm from the x-axis (degrees), with no more than 180 degrees between
+                neighboring arms, e.g. (0, 90, 180, 270) for an X junction.
+            n_segments: Number of DC segments on each side of every arm.
+            segment_width: Width of each DC segment along its arm (µm).
 
         Returns:
             New trap
         """
         trap = cls()
-        preset = LINEAR_SURFACE_TRAP
-        if gratings:
-            preset = LINEAR_SURFACE_TRAP_WITH_GRATINGS
-        if photonics:
-            preset = LINEAR_SURFACE_TRAP_WITH_PHOTONICS
-        if _lib.generate_trap_from_preset(preset, int(n_segments), float(segment_width), C.byref(trap.struct)) != 0:
-            raise TiOptError("failed to generate trap from preset")
+        angles = _array(np.radians(arm_angles))
+        status = _lib.generate_junction_trap(len(angles), _ptr(angles), int(n_segments), float(segment_width), C.byref(trap.struct))
+        flush_c_output()
+        if status != 0:
+            _lib.free_trap(C.byref(trap.struct))
+            raise TiOptError(f"failed to generate a junction with arms at {list(arm_angles)} degrees")
+        return trap
+
+    @classmethod
+    def from_layout(cls, layout, zone_spacing=100.0, segment_width=50.0, element="40Ca+", photonics=True, n_ions=0):
+        """Generate a five-wire linear surface trap for a zone layout (see generate_trap_from_layout).
+
+        The zones are spaced evenly along the trap axis and centered on the trap, with enough DC segments to make wells
+        beyond the outermost zones, and with integrated photonics addressing every zone (see Trap.add_zone_photonics).
+
+        Args:
+            layout: Zone layout, e.g. "load, storage x2, gate x5, measure" (see parse_layout).
+            zone_spacing: Distance between neighboring zones (µm).
+            segment_width: Width of each DC segment along the trap axis (µm).
+            element: Ion species which the photonics are designed for.
+            photonics: Specifies whether to add integrated photonics.
+            n_ions: Number of ions which load, storage, and measurement zones hold when the layout gives no capacity (0
+                for a default).
+
+        Returns:
+            New trap
+        """
+        trap = cls()
+        status = _lib.generate_trap_from_layout(layout.encode(), int(n_ions), float(zone_spacing), float(segment_width), element.encode(), int(photonics), C.byref(trap.struct))
+        flush_c_output()
+        if status != 0:
+            _lib.free_trap(C.byref(trap.struct))
+            raise TiOptError(f"failed to generate a trap for the zone layout {layout!r}")
         return trap
 
     @classmethod
@@ -799,6 +1013,199 @@ class Trap:
         if _lib.add_trap_photonics(C.byref(self.struct), _ptr(_array(gate_position)), _ptr(_array(measure_position))) != 0:
             raise TiOptError("failed to design the trap's grating couplers")
 
+    # Zones ----------------------------------------------------------------------------------------------------------
+
+    def zones(self):
+        """Get the zones of the trap as Zone objects (copies, which set_zones writes back)."""
+        return [
+            Zone(_format_zone_type(zone.zone_type), zone.zone_capacity, np.array(list(zone.position)))
+            for zone in (self.struct.zones[z] for z in range(self.struct.n_zones))
+        ]
+
+    def set_zones(self, zones):
+        """Replace the zones of the trap.
+
+        Args:
+            zones: Zone objects, or (types, capacity, position) for every zone, where a capacity of None or 0 gives the
+                default for the types and a position with a z of None puts the zone at ION_HEIGHT.
+        """
+        zones = [(z.types, z.capacity, z.position) if isinstance(z, Zone) else tuple(z) for z in zones]
+        _lib.allocate_zones(C.byref(self.struct), len(zones))
+        for z, (types, capacity, position) in enumerate(zones):
+            value = _zone_type(types)
+            if not capacity:
+                capacity = _lib.default_zone_capacity(value, 0)
+            x, y, height = position
+            point = _array([x, y, ION_HEIGHT if height is None else height])
+            _lib.set_trap_zone(C.byref(self.struct), z, value, int(capacity), _ptr(point))
+
+    def set_layout(self, layout, zone_spacing=100.0, n_ions=0):
+        """Replace the zones of the trap with a zone layout spaced evenly along the trap axis (see parse_layout)."""
+        if _lib.set_layout_zones(C.byref(self.struct), layout.encode(), int(n_ions), float(zone_spacing)) != 0:
+            flush_c_output()
+            raise ValueError(f"failed to parse zone layout {layout!r}")
+
+    def add_zone_photonics(self, element="40Ca+"):
+        """Replace the photonics of the trap with photonics for a species which address every zone.
+
+        Every zone gets a grating coupler for each beam its types need: the qubit and quench beams in gate zones, the
+        detection and repump beams in measurement, cooling, and loading zones, and the photoionization beams in loading
+        zones. Every measurement zone also gets a detector beneath it.
+
+        Args:
+            element: Ion species (see Ion.PRESETS), which sets the wavelengths (see photonics_beam).
+        """
+        status = _lib.add_zone_photonics(C.byref(self.struct), element.encode())
+        flush_c_output()
+        if status != 0:
+            raise TiOptError(f"failed to design the photonics for {element}")
+
+    def grating(self, beam, zone=None):
+        """Get the grating coupler which delivers a beam of PHOTONICS_BEAMS (to a zone, if one is given), or None."""
+        for grating in self.grating_couplers():
+            if grating.beam == beam and (zone is None or grating.zone == zone):
+                return grating
+        return None
+
+    def detector(self, zone=None):
+        """Get the detector beneath a zone (or the first detector, if no zone is given), or None."""
+        for detector in self.detectors():
+            if zone is None or detector.zone == zone:
+                return detector
+        return None
+
+    def zone_graph(self):
+        """Get the zones of the trap as a TrapGraph for scheduling transports, with consecutive zones connected."""
+        return TrapGraph.from_trap(self)
+
+    # Layout files -----------------------------------------------------------------------------------------------------
+
+    def save_gds(self, path, cell="TIOPT"):
+        """Write the electrodes, photonics, and zones of the trap to a GDSII file for layout tools (see tiopt.export)."""
+        from . import export
+        export.write_gds(self, path, cell)
+
+    def save_svg(self, path, scale=2.0):
+        """Draw the electrodes, photonics, and zones of the trap in an SVG file, with scale pixels per µm."""
+        from . import export
+        export.write_svg(self, path, scale)
+
+    @classmethod
+    def from_gds(cls, path, rf_layers=(1,), dc_layers=(2,), zone_layer=30, V_RF=40.0, Omega_RF=2 * np.pi * 40e6):
+        """Build a trap from the polygons of a GDSII file, such as one drawn in KLayout.
+
+        Polygons on the RF layers become RF electrodes and those on the DC layers DC electrodes, and text labels on the
+        zone layer which name zone types (e.g. "gate" or "load+storage") become zones. Hierarchical layouts should be
+        flattened first (see tiopt.export.read_gds).
+
+        Args:
+            path: GDSII file to read.
+            rf_layers: Layers of the RF electrodes.
+            dc_layers: Layers of the DC electrodes.
+            zone_layer: Layer of the zone labels, or None to skip them.
+            V_RF: Amplitude of the RF voltage (V).
+            Omega_RF: Angular frequency of the RF drive (rad/s).
+
+        Returns:
+            New trap
+        """
+        from . import export
+        polygons, texts = export.read_gds(path)
+        rf = [polygon for layer in rf_layers for polygon in polygons.get(layer, [])]
+        dc = [polygon for layer in dc_layers for polygon in polygons.get(layer, [])]
+        if not rf and not dc:
+            raise TiOptError(f"no electrodes on layers {tuple(rf_layers) + tuple(dc_layers)} of {path}")
+        trap = cls.from_polygons(rf + dc, len(rf), V_RF, Omega_RF)
+        zones = []
+        for layer, string, position in texts:
+            if layer != zone_layer:
+                continue
+            try:
+                _zone_type(string)
+            except ValueError:
+                warnings.warn(f"skipped the label {string!r} on the zone layer of {path}, which is not a zone type")
+                continue
+            zones.append((string, 0, (position[0], position[1], None)))
+        if zones:
+            trap.set_zones(zones)
+        return trap
+
+    # Design report ----------------------------------------------------------------------------------------------------
+
+    def design_report(self, ion, detection_time=50e-6, omega_axial=AXIAL_FREQUENCY):
+        """Evaluate every zone of the trap (or its center, if it has no zones) for an ion species.
+
+        For each zone, the RF null nearest to it is found in the plane across the direction from the trap center (the
+        axis of a linear trap or of an arm of a junction), and the report gives the pseudopotential there (which is
+        zero on a true RF null), the secular frequencies of the pseudopotential alone, the Mathieu q parameter, and the
+        trap depth. It also gives the intensity of every beam addressing the zone, with the Rabi frequency, Lamb-Dicke
+        parameter (for an axial mode of omega_axial along that direction), and crosstalk onto the other zones of the
+        qubit beam, and the fidelity of detection with the zone's detector. Zones outside the spherical harmonics
+        expansions are only reported as such, with the number of spheres a build would need to reach them.
+
+        Args:
+            ion: Ion species.
+            detection_time: Duration of detection (s).
+            omega_axial: Axial secular frequency (rad/s) for the Lamb-Dicke parameter.
+
+        Returns:
+            List of dictionaries, one for each zone
+        """
+        self._require_solved()
+        zones = self.zones() or [Zone("center", 0, np.array([0.0, 0.0, ION_HEIGHT]))]
+        x_min, x_max, y_min, y_max = expansion_region()
+        gratings = self.grating_couplers()
+
+        report = []
+        for z, zone in enumerate(zones):
+            entry = {"zone": z, "types": zone.types, "position": zone.position, "beams": {}}
+            report.append(entry)
+            x, y = zone.position[:2]
+            if not (x_min <= x <= x_max and y_min <= y <= y_max):
+                xs = [zone.position[0] for zone in zones]
+                entry["outside_expansions"] = True
+                entry["required_nsph_x"] = required_nsph_x(min(min(xs), x_min), max(max(xs), x_max))
+                continue
+
+            radius = math.hypot(x, y)
+            direction = np.array([x / radius, y / radius, 0.0]) if radius > 1.0 else np.array([1.0, 0.0, 0.0])
+            try:
+                null = self.rf_null_across(zone.position, direction)
+            except TiOptError:
+                null = np.array(zone.position, dtype=float)
+            entry["rf_null"] = null
+            entry["pseudopotential"] = float(self.pseudopotential(ion, null)) / E_CHARGE
+
+            omega, _ = self.normal_modes(ion, null)
+            entry["secular_frequencies"] = omega
+            entry["mathieu_q"] = 2 * math.sqrt(2) * max(omega) / self.Omega_RF if self.Omega_RF > 0 else 0.0
+            entry["trap_depth"] = self.trap_depth(ion, null)
+
+            for g, grating in enumerate(gratings):
+                if grating.zone != z:
+                    continue
+                intensity, k_vector = grating.beam_at(null)
+                beam = {"wavelength": grating.struct.waveguide.wavelength, "intensity": intensity}
+                if grating.beam == "qubit" and intensity > 0:
+                    beam["rabi_frequency"] = rabi_frequency_from_intensity(ion.qubit_linewidth, ion.qubit_wavelength, intensity)
+                    beam["lamb_dicke_parameter"] = lamb_dicke_parameter(k_vector, direction, ion, omega_axial)
+                    others = [grating.beam_at(other.position)[0] for o, other in enumerate(zones) if o != z]
+                    beam["crosstalk"] = max(others) / intensity if others else 0.0
+                entry["beams"][grating.beam or f"grating {g}"] = beam
+
+            detector = self.detector(z)
+            detection = entry["beams"].get("detection")
+            if detector is not None and detection is not None:
+                gamma_SP = ion.struct.gamma_SP
+                wavelength_SP = 2 * np.pi * C_LIGHT / ion.struct.omega_SP
+                s = detection["intensity"] / saturation_intensity(gamma_SP, wavelength_SP)
+                collection = detector.collection_efficiency(null)
+                photon_rate = scattering_rate(gamma_SP, s, -0.5 * gamma_SP) * collection
+                entry["collection_efficiency"] = collection
+                entry["detection_fidelity"] = detection_fidelity(photon_rate, detector.dark_count_rate, ion.qubit_linewidth, detection_time)[0]
+
+        return report
+
     def zero_voltages(self):
         """Get a voltage of 0 V for every electrode."""
         return np.zeros(self.n_electrodes)
@@ -916,6 +1323,46 @@ class Trap:
         axes = np.zeros((3, 3))
         _lib.compute_normal_modes(C.byref(self.struct), ion.mass, ion.charge, _ptr(self._voltages(voltages)), _ptr(_array(position)), _ptr(omega), _ptr(axes))
         return omega, axes
+
+    def rf_null_across(self, position, direction=(1.0, 0.0, 0.0), max_iterations=100):
+        """Find the point of the RF null line nearest to a position in the plane across a direction in the trap surface.
+
+        Args:
+            position: Starting point (µm), where a z of None starts at ION_HEIGHT.
+            direction: Direction along the RF null line, such as the axis of an arm of a junction.
+            max_iterations: Largest number of Newton iterations.
+
+        Returns:
+            Point of the RF null line (µm)
+        """
+        self._require_solved()
+        x, y, z = position
+        point = _array([x, y, ION_HEIGHT if z is None else z])
+        if _lib.find_rf_null_across(C.byref(self.struct), _ptr(point), _ptr(_array(direction)), max_iterations) != 0:
+            raise TiOptError("failed to find RF null")
+        return point
+
+    def rf_null_path(self, ion, waypoints, n_samples=101):
+        """Follow the RF null along a path through waypoints, such as from one arm of a junction into another.
+
+        At each of n_samples points spaced evenly along the path, the minimum of the pseudopotential in the plane across
+        the path is found; the highest of these is the barrier an ion must cross, e.g. at the center of a junction.
+
+        Args:
+            ion: Ion species.
+            waypoints: Points along the path (µm) with shape (n_waypoints, 3).
+            n_samples: Number of points along the path.
+
+        Returns:
+            Points of the RF null (µm) with shape (n_samples, 3), the pseudopotential there (eV), and the height of the
+            highest barrier along the path above the lower of its ends (eV)
+        """
+        self._require_solved()
+        waypoints = _array(waypoints).reshape(-1, 3)
+        positions = np.zeros((n_samples, 3))
+        energies = np.zeros(n_samples)
+        barrier = _lib.compute_rf_null_path(C.byref(self.struct), ion.mass, ion.charge, len(waypoints), _ptr(waypoints), int(n_samples), _ptr(positions), _ptr(energies))
+        return positions, energies, barrier
 
     def find_rf_null(self, position=(0.0, 0.0, None), max_iterations=100):
         """Find the point of the RF null line at the x-coordinate of position, starting the search at ION_HEIGHT if z is
@@ -1281,6 +1728,8 @@ class Grating:
     def __init__(self, struct=None, **kwargs):
         if struct is None:
             struct = GratingCouplerStruct()
+            struct.beam = -1
+            struct.zone = -1
             struct.waveguide = Waveguide()._struct()
             struct.fill_factor = 0.5
             struct.etch_depth = struct.waveguide.thickness
@@ -1304,8 +1753,22 @@ class Grating:
             self.struct.position = _vec3(*value)
         elif name == "waveguide":
             self.struct.waveguide = value._struct()
+        elif name == "beam":
+            self.struct.beam = -1 if value is None else PHOTONICS_BEAMS.index(value)
+        elif name == "zone":
+            self.struct.zone = -1 if value is None else int(value)
         else:
             object.__setattr__(self, name, value)
+
+    @property
+    def beam(self):
+        """Beam of PHOTONICS_BEAMS which the grating delivers, or None for any other light."""
+        return PHOTONICS_BEAMS[self.struct.beam] if 0 <= self.struct.beam < len(PHOTONICS_BEAMS) else None
+
+    @property
+    def zone(self):
+        """Index of the zone of the trap which the grating addresses, or None."""
+        return self.struct.zone if self.struct.zone >= 0 else None
 
     @property
     def position(self):
@@ -1373,6 +1836,7 @@ class Detector:
             struct.wavelength = 0.397
             struct.quantum_efficiency = 0.8
             struct.dark_count_rate = 10.0
+            struct.zone = -1
         self.struct = struct
         for name, value in kwargs.items():
             setattr(self, name, value)
@@ -1387,6 +1851,8 @@ class Detector:
             setattr(self.struct, name, float(value))
         elif name == "position":
             self.struct.position = _vec3(*value)
+        elif name == "zone":
+            self.struct.zone = -1 if value is None else int(value)
         else:
             object.__setattr__(self, name, value)
 
@@ -1394,6 +1860,11 @@ class Detector:
     def position(self):
         """Center of the active area (µm)."""
         return np.array(list(self.struct.position))
+
+    @property
+    def zone(self):
+        """Index of the zone of the trap beneath which the detector lies, or None."""
+        return self.struct.zone if self.struct.zone >= 0 else None
 
     def collection_efficiency(self, position):
         """Compute the fraction of the photons emitted by an ion at position (µm) which the detector counts."""
@@ -1668,17 +2139,8 @@ class Circuit:
         return instructions
 
 
-def _zone_type(name):
-    value = 0
-    for part in name.upper().split("+"):
-        if part.strip() not in ZONE_TYPES:
-            raise ValueError(f"unknown zone type {part.strip().lower()!r}; choose from {', '.join(k.lower() for k in ZONE_TYPES)}")
-        value |= ZONE_TYPES[part.strip()]
-    return value
-
-
 class TrapGraph:
-    """Zones along a linear trap, between which ions are transported."""
+    """Zones of a trap, between which ions are transported."""
 
     def __init__(self, zone_types, zone_capacities, x_min, x_max, height=ION_HEIGHT):
         """Make zones spaced evenly along the trap axis.
@@ -1697,6 +2159,30 @@ class TrapGraph:
         _lib.generate_linear_trap_graph(n, types, capacities, x_min, x_max, height, C.byref(self.struct))
         self.zone_types = list(zone_types)
 
+    @classmethod
+    def from_layout(cls, layout, zone_spacing=100.0, n_ions=0, height=ION_HEIGHT):
+        """Make the zones of a zone layout (see parse_layout), spaced evenly along the trap axis and centered on it.
+
+        Args:
+            layout: Zone layout, e.g. "load, storage x2, gate x5, measure".
+            zone_spacing: Distance between neighboring zones (µm).
+            n_ions: Number of ions which load, storage, and measurement zones hold when the layout gives no capacity (0
+                for a default).
+            height: Height of the zones above the surface (µm).
+        """
+        zones = parse_layout(layout, n_ions)
+        half_span = 0.5 * (len(zones) - 1) * zone_spacing
+        return cls([t for t, _ in zones], [c for _, c in zones], -half_span, half_span, height)
+
+    @classmethod
+    def from_trap(cls, trap):
+        """Make the zones of a trap (see Trap.zones), with consecutive zones connected."""
+        graph = cls.__new__(cls)
+        graph.struct = TrapGraphStruct()
+        _lib.generate_trap_graph_from_zones(C.byref(trap.struct), C.byref(graph.struct))
+        graph.zone_types = [zone.types for zone in trap.zones()]
+        return graph
+
     def close(self):
         """Free the memory of the zones."""
         if self.struct.zone_nodes:
@@ -1711,7 +2197,12 @@ class TrapGraph:
     @property
     def positions(self):
         """Positions of the zones (µm)."""
-        return np.array([list(self.struct.zone_nodes[z].position) for z in range(self.struct.n_zones)])
+        return np.array([list(self.struct.zone_nodes[z].position) for z in range(self.struct.n_zones)]).reshape(-1, 3)
+
+    @property
+    def capacities(self):
+        """Number of ions which each zone holds."""
+        return [self.struct.zone_nodes[z].zone_capacity for z in range(self.struct.n_zones)]
 
 
 class TransportProgram:
@@ -1868,10 +2359,11 @@ class Codesign:
 
     Stage 0 makes a basic design of everything when the co-design is created, and run() then makes passes over stages
     1-5 (trap, photonics, transport, waveforms, and metrics). The first pass optimizes each part a little based on its
-    own objective, and later passes optimize every part based on the quantum computing metrics of the whole design.
+    own objective, and later passes optimize every part based on the quantum computing metrics of the whole design. The
+    trap is a linear trap with the zones of a zone layout, which are spaced evenly along its axis.
     """
 
-    def __init__(self, qasm_path, element="40Ca+", environment=None, parameters=None):
+    def __init__(self, qasm_path, element="40Ca+", environment=None, parameters=None, layout=None):
         """Make the basic design for a circuit (stage 0).
 
         Args:
@@ -1879,10 +2371,12 @@ class Codesign:
             element: Ion species.
             environment: Values which replace the defaults of default_codesign_environment.
             parameters: Values which replace the defaults of default_codesign_parameters.
+            layout: Zone layout of the trap (see parse_layout), or None for "load+storage, empty, gate, empty, measure";
+                the zones are brought closer together if they do not fit within the spherical harmonics expansions.
         """
         env = _dict_to_struct(CodesignEnvironmentStruct, environment or {}, _environment_defaults())
         params = _dict_to_struct(CodesignParametersStruct, parameters or {}, _parameter_defaults())
-        pointer = _lib.create_codesign(element.encode(), str(qasm_path).encode(), C.byref(env), C.byref(params))
+        pointer = _lib.create_codesign(element.encode(), str(qasm_path).encode(), layout.encode() if layout else None, C.byref(env), C.byref(params))
         flush_c_output()
         if not pointer:
             raise TiOptError(f"failed to set up the co-design of {qasm_path}")
@@ -1894,6 +2388,11 @@ class Codesign:
         if self._pointer:
             _lib.free_codesign(self._pointer)
             self._pointer = None
+
+    @property
+    def zone_layout(self):
+        """Zone layout of the trap (see parse_layout)."""
+        return _lib.get_codesign_zone_layout(self._pointer).decode()
 
     def __del__(self):
         try:

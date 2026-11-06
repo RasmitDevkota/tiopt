@@ -23,6 +23,7 @@
 #include "circuits.h"
 #include "codesign.h"
 #include "acceleration.h"
+#include "zones.h"
 
 // Number of DC segments on each side of the trap optimized by the optimization loop
 #ifndef OPTIMIZATION_N_SEGMENTS
@@ -333,7 +334,7 @@ static void run_codesign_flow
 	char *qasm_filename
 )
 {
-	struct Codesign *codesign = create_codesign("40Ca+", qasm_filename, NULL, NULL);
+	struct Codesign *codesign = create_codesign("40Ca+", qasm_filename, NULL, NULL, NULL);
 	if (codesign == NULL)
 		return;
 
@@ -351,6 +352,77 @@ static void run_codesign_flow
 		printf("Wrote the co-designed trap to codesign.trap\n");
 
 	free_codesign(codesign);
+}
+
+// Design a linear trap with integrated photonics for a zone layout and look at every zone, and find the barrier an ion
+// crosses turning through an X junction
+static void design_traps
+(
+	char *layout
+)
+{
+	struct IonParameters ion;
+	generate_ion_from_preset("40Ca+", &ion);
+
+	double m = ion_mass(&ion);
+	double q = ion_charge(&ion);
+
+	struct Trap trap;
+	if (generate_trap_from_layout(layout, 0, 80.0, 50.0, "40Ca+", 1, &trap) != 0)
+		return;
+
+	solve_trap_electrodynamics(&trap, ANALYTICAL, NULL);
+
+	printf("\nTrap for '%s': %d RF and %d DC electrodes, %d grating couplers and %d detectors\n", layout, trap.n_electrodes_rf, trap.n_electrodes_dc, trap.n_grating_couplers, trap.n_detectors);
+
+	double wavelength_SD = 2 * PI * C_LIGHT / ion.omega_SD;
+
+	for (int z = 0; z < trap.n_zones; z++)
+	{
+		struct ZoneNode *zone = &(*trap.zones)[z];
+
+		char types[64];
+		format_zone_types(zone->zone_type, types, sizeof(types));
+
+		double null[3] = { zone->position[0], zone->position[1], zone->position[2] };
+		find_rf_null(&trap, &null, 100);
+
+		printf("Zone %d (%s): RF null at (%.1f, %.1f, %.1f) µm, trap depth %.1f meV\n", z, types, null[0], null[1], null[2], compute_trap_depth(&trap, m, q, null) * 1E3);
+
+		for (int g = 0; g < trap.n_grating_couplers; g++)
+		{
+			struct GratingCoupler *grating = &(*trap.grating_couplers)[g];
+
+			if (grating->zone != z)
+				continue;
+
+			double intensity;
+			evaluate_grating_beam(grating, null, &intensity, NULL);
+
+			printf("  %.0f nm beam: %.3e W/m^2", grating->waveguide.wavelength * 1E3, intensity);
+			if (grating->beam == QUBIT_BEAM)
+				printf(", Rabi frequency 2 pi x %.1f kHz", rabi_frequency_from_intensity(ion.gamma_SD, wavelength_SD, intensity) / (2 * PI * 1E3));
+			printf("\n");
+		}
+	}
+
+	if (write_trap_to_file("designed.trap", &trap) == 0)
+		printf("Wrote the trap to designed.trap\n");
+
+	free_trap(&trap);
+
+	struct Trap junction;
+	if (generate_trap_from_preset(X_JUNCTION_TRAP, 2, 40.0, &junction) != 0)
+		return;
+
+	solve_trap_electrodynamics(&junction, ANALYTICAL, NULL);
+
+	double waypoints[3][3] = { { 150.0, 0.0, ION_HEIGHT }, { 0.0, 0.0, ION_HEIGHT }, { 0.0, 150.0, ION_HEIGHT } };
+	double barrier = compute_rf_null_path(&junction, m, q, 3, waypoints, 61, NULL, NULL);
+
+	printf("\nTurning through the X junction preset crosses a pseudopotential barrier of %.2f meV\n", barrier * 1E3);
+
+	free_trap(&junction);
 }
 
 // Main optimization loop
@@ -430,6 +502,7 @@ int main()
 		printf("(6) Design a grating coupler addressing the trap center.\n");
 		printf("(7) Simulate Rabi oscillations and a Molmer-Sorensen gate.\n");
 		printf("(8) Co-design a trap with integrated photonics for a GHZ circuit.\n");
+		printf("(9) Design a trap for a zone layout and analyze a junction.\n");
 		printf("Enter your option and press enter: ");
 
 		int result = scanf("%d", &option);
@@ -478,6 +551,9 @@ int main()
 				break;
 			case 8:
 				run_codesign_flow("examples/circuits/ghz3.qasm");
+				break;
+			case 9:
+				design_traps("load, storage, gate x2, measure");
 				break;
 			default:
 				printf("Not an option.\n");

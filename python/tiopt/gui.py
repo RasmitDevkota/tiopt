@@ -246,19 +246,33 @@ class Tab(ttk.Frame):
 
 
 class TrapTab(Tab):
+    # Presets of the preset library, with the name Trap.from_preset knows them by (None for a trap from a zone layout)
+    PRESETS = {
+        "Linear": "linear",
+        "Linear from zone layout": None,
+        "X junction": "x_junction",
+        "Y junction": "y_junction",
+        "T junction": "t_junction",
+        "Point trap": "point",
+    }
+
     def __init__(self, app):
         super().__init__(app, "Trap")
 
-        preset = self.form("Linear surface trap preset")
+        preset = self.form("Trap preset")
+        preset.combo("preset", "Preset", tuple(self.PRESETS), "Linear")
         preset.entry("n_segments", "Segments per side", 7)
         preset.entry("segment_width", "Segment width", 50, "µm")
-        preset.check("gratings", "Grating coupler under the trap center", True)
-        preset.check("photonics", "Full 40Ca+ photonics (4 gratings and a detector)", False)
+        preset.entry("layout", "Zone layout", lib.DEFAULT_LAYOUT)
+        preset.entry("zone_spacing", "Zone spacing", 100, "µm")
+        preset.check("gratings", "Grating coupler under the trap center (linear)", True)
+        preset.check("photonics", "Integrated photonics for every zone", False)
         preset.buttons(("Generate", self.generate_preset))
         self.preset = preset
 
-        files = self.form("Trap files")
+        files = self.form("Trap and layout files")
         files.buttons(("Load...", self.load_file), ("Save...", self.save_file))
+        files.buttons(("Import GDS...", self.import_gds), ("Export GDS...", self.export_gds), ("Export SVG...", self.export_svg))
 
         rf = self.form("RF drive")
         rf.entry("V_RF", "Amplitude", 40, "V")
@@ -269,6 +283,23 @@ class TrapTab(Tab):
         ion = self.form("Ion species")
         self.ion_var = ion.combo("species", "Species", Ion.PRESETS, "40Ca+")
         self.ion_var.trace_add("write", lambda *args: self.app.set_ion(self.ion_var.get()))
+
+        report = self.form("Design report")
+        report.buttons(("Evaluate zones", self.design_report))
+        self.report = ScrolledText(report, height=10, width=46, wrap="none")
+        self.report.grid(row=report.row, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        self.report.configure(state="disabled")
+        report.row += 1
+
+        zones = ttk.LabelFrame(self.controls, text="Zones", padding=6)
+        zones.pack(fill="both", expand=True, padx=(0, 4), pady=(0, 6))
+        self.zone_tree = ttk.Treeview(zones, columns=("types", "capacity", "x", "y"), height=5)
+        self.zone_tree.heading("#0", text="#")
+        self.zone_tree.column("#0", width=40)
+        for column, text, width in (("types", "Types", 120), ("capacity", "Ions", 50), ("x", "x (µm)", 70), ("y", "y (µm)", 70)):
+            self.zone_tree.heading(column, text=text)
+            self.zone_tree.column(column, width=width, anchor="e")
+        self.zone_tree.pack(fill="both", expand=True)
 
         table = ttk.LabelFrame(self.controls, text="Electrodes", padding=6)
         table.pack(fill="both", expand=True, padx=(0, 4))
@@ -283,17 +314,69 @@ class TrapTab(Tab):
         self.plot.message("Generate a preset or load a trap file")
 
     def generate_preset(self):
+        name = self.preset.get_str("preset")
+        if name not in self.PRESETS:
+            raise ValueError(f"Choose a preset from {', '.join(self.PRESETS)}")
+        preset = self.PRESETS[name]
         n_segments = self.preset.get_int("n_segments")
         segment_width = self.preset.get("segment_width")
-        gratings = self.preset.get("gratings")
+        layout = self.preset.get_str("layout")
+        zone_spacing = self.preset.get("zone_spacing")
+        gratings = self.preset.get("gratings") and preset == "linear"
         photonics = self.preset.get("photonics")
+        element = self.app.ion.element
 
         def work():
-            trap = Trap.from_preset(n_segments, segment_width, gratings, photonics)
+            if preset is None:
+                trap = Trap.from_layout(layout, zone_spacing, segment_width, element, photonics)
+            else:
+                trap = Trap.from_preset(n_segments, segment_width, gratings and not photonics, False, preset)
+                if photonics:
+                    if preset == "linear":
+                        # A gate zone at the center and a measurement zone two segments along
+                        trap.set_zones([("gate", 0, (0.0, 0.0, None)), ("measure", 0, (2 * segment_width, 0.0, None))])
+                    trap.add_zone_photonics(element)
             trap.solve("analytical")
             return trap
 
-        self.app.run_task("Generating and solving trap", work, self.app.set_trap)
+        self.app.run_task(f"Generating and solving the {name.lower()} trap", work, self.app.set_trap)
+
+    def import_gds(self):
+        path = filedialog.askopenfilename(parent=self, title="Import GDSII layout (RF electrodes on layer 1, DC electrodes on layer 2)", initialdir=REPOSITORY, filetypes=[("GDSII", "*.gds"), ("All files", "*")])
+        if not path:
+            return
+
+        def work():
+            trap = Trap.from_gds(path)
+            trap.solve("analytical")
+            return trap
+
+        self.app.run_task(f"Importing {Path(path).name}", work, self.app.set_trap)
+
+    def export_gds(self):
+        if self.app.trap is None:
+            raise ValueError("There is no trap to export")
+        path = filedialog.asksaveasfilename(parent=self, title="Export GDSII layout", initialdir=REPOSITORY, defaultextension=".gds", filetypes=[("GDSII", "*.gds")])
+        if path:
+            self.app.trap.save_gds(path)
+            self.app.set_status(f"Exported trap layout to {path}")
+
+    def export_svg(self):
+        if self.app.trap is None:
+            raise ValueError("There is no trap to export")
+        path = filedialog.asksaveasfilename(parent=self, title="Export SVG drawing", initialdir=REPOSITORY, defaultextension=".svg", filetypes=[("SVG", "*.svg")])
+        if path:
+            self.app.trap.save_svg(path)
+            self.app.set_status(f"Exported trap drawing to {path}")
+
+    def design_report(self):
+        trap = self.require_trap()
+        ion = self.app.ion
+
+        def work():
+            return lib.format_design_report(trap.design_report(ion))
+
+        self.app.run_task("Evaluating the zones of the design", work, lambda text: set_text(self.report, text))
 
     def load_file(self):
         path = filedialog.askopenfilename(parent=self, title="Load trap file", initialdir=REPOSITORY, filetypes=[("Trap files", "*.data *.trap"), ("All files", "*")])
@@ -325,8 +408,13 @@ class TrapTab(Tab):
     def refresh(self):
         trap = self.app.trap
         self.tree.delete(*self.tree.get_children())
+        self.zone_tree.delete(*self.zone_tree.get_children())
         if trap is None:
             return
+
+        zones = trap.zones()
+        for z, zone in enumerate(zones):
+            self.zone_tree.insert("", "end", text=str(z), values=(zone.types, zone.capacity, f"{zone.position[0]:.1f}", f"{zone.position[1]:.1f}"))
 
         self.rf.set("V_RF", f"{trap.V_RF:g}")
         self.rf.set("f_RF", f"{trap.Omega_RF / TWO_PI / 1e6:g}")
@@ -351,6 +439,7 @@ class TrapTab(Tab):
         ax.add_patch(Rectangle((x_min, y_min), x_span, y_span, fill=False, linestyle="--", edgecolor="gray", label="Expansion region"))
 
         draw_photonics(ax, trap)
+        draw_zones(ax, zones)
 
         if trap.solved and trap.n_rf > 0:
             try:
@@ -371,6 +460,10 @@ class TrapTab(Tab):
         self.plot.draw()
 
 
+# Colors of the beams of PHOTONICS_BEAMS
+BEAM_COLORS = {"qubit": "tab:red", "detection": "tab:purple", "repump": "tab:brown", "quench": "tab:pink", "photoionization": "tab:blue", "ionization": "tab:cyan"}
+
+
 def wavelength_color(wavelength):
     """Get the plot color for light of a wavelength (µm), distinguishing the 40Ca+ beams."""
     for limit, color in ((0.45, "tab:purple"), (0.8, "tab:red"), (0.86, "tab:pink")):
@@ -379,14 +472,21 @@ def wavelength_color(wavelength):
     return "tab:brown"
 
 
+def draw_zones(ax, zones):
+    """Mark the zones of a trap on xy axes, labeled with their types."""
+    for z, zone in enumerate(zones):
+        ax.plot(zone.position[0], zone.position[1], marker="o", color="black", markersize=4, linestyle="none", label="Zones" if z == 0 else None)
+        ax.annotate(zone.types, (zone.position[0], zone.position[1]), textcoords="offset points", xytext=(0, 6), ha="center", fontsize=7)
+
+
 def draw_photonics(ax, trap):
     """Draw the grating couplers (with their beam directions) and detectors of a trap on xy axes."""
     labelled = set()
     for grating in trap.grating_couplers():
         position = grating.position
         wavelength = grating.struct.waveguide.wavelength
-        color = wavelength_color(wavelength)
-        label = f"{wavelength * 1e3:.0f} nm grating"
+        color = BEAM_COLORS.get(grating.beam, wavelength_color(wavelength))
+        label = f"{wavelength * 1e3:.0f} nm" + (f" {grating.beam}" if grating.beam else " grating")
         ax.plot(position[0], position[1], marker="s", color=color, linestyle="none", label=label if label not in labelled else None)
         labelled.add(label)
         emission = grating.emission()
@@ -824,7 +924,8 @@ class PhotonicsTab(Tab):
         trap = self.app.trap
         if trap is None or not trap.grating_couplers():
             raise ValueError("The current trap has no grating couplers (enable them in the Trap tab preset)")
-        grating = trap.grating_couplers()[0]
+        # The first qubit grating, if there is one
+        grating = trap.grating("qubit") or trap.grating_couplers()[0]
         waveguide = grating.waveguide
         for key, value in (("wavelength", waveguide.wavelength), ("width", waveguide.width), ("thickness", waveguide.thickness), ("n_core", waveguide.n_core), ("n_cladding", waveguide.n_cladding)):
             self.waveguide.set(key, f"{value:g}")
@@ -1189,10 +1290,9 @@ class SchedulingTab(Tab):
 
         zones = self.form("Trap zones")
         # Wells closer than several ion heights need large voltages to be held at once, so the zones are 100 µm apart
-        zones.entry("types", "Types", "load+storage,empty,gate,empty,measure")
-        zones.entry("capacities", "Capacities", "4,1,2,1,4")
-        zones.entry("x_min", "First zone", -200, "µm")
-        zones.entry("x_max", "Last zone", 200, "µm")
+        zones.entry("layout", "Zone layout", lib.DEFAULT_LAYOUT)
+        zones.entry("zone_spacing", "Zone spacing", 100, "µm")
+        zones.check("trap_zones", "Use the zones of the trap instead", False)
         self.zones = zones
 
         actions = self.form("Actions")
@@ -1214,30 +1314,31 @@ class SchedulingTab(Tab):
         if path:
             self.qasm_var.set(path)
 
-    def _trap_graph(self):
-        types = [t.strip() for t in self.zones.get_str("types").split(",") if t.strip()]
-        capacities = [int(c) for c in self.zones.get_str("capacities").split(",") if c.strip()]
-        if len(types) != len(capacities):
-            raise ValueError("Give one capacity for each zone")
-        for t in types:
-            lib._zone_type(t)
+    def _trap_graph(self, n_ions):
+        if self.zones.get("trap_zones"):
+            if self.app.trap is None or not self.app.trap.zones():
+                raise ValueError("The trap has no zones; generate a trap from a zone layout in the Trap tab")
+            trap_graph = TrapGraph.from_trap(self.app.trap)
+            return trap_graph, trap_graph.zone_types
         height = ION_HEIGHT
         if self.app.trap is not None and self.app.trap.solved and self.app.trap.n_rf > 0:
             height = self.app.trap.find_rf_null((0.0, 0.0, None))[2]
-        return TrapGraph(types, capacities, self.zones.get("x_min"), self.zones.get("x_max"), height), types
+        trap_graph = TrapGraph.from_layout(self.zones.get_str("layout"), self.zones.get("zone_spacing"), n_ions, height)
+        return trap_graph, trap_graph.zone_types
 
     def schedule(self):
         path = self.qasm_var.get()
-        trap_graph, types = self._trap_graph()
+        graphs = []
 
         def work():
             circuit = Circuit(path)
-            program = TransportProgram(trap_graph, circuit)
+            graphs.append(self._trap_graph(circuit.n_ions))
+            program = TransportProgram(graphs[0][0], circuit)
             return circuit, program
 
         def done(result):
             self.circuit, self.program = result
-            self.show(trap_graph, types)
+            self.show(*graphs[0])
 
         self.app.run_task("Scheduling transports", work, done)
 
@@ -1345,7 +1446,9 @@ class CodesignTab(Tab):
 
         circuit = self.form("Circuit")
         self.qasm_var = circuit.entry("qasm", "OpenQASM file", EXAMPLES / "circuits" / "bell.qasm")
+        circuit.entry("layout", "Zone layout", lib.DEFAULT_LAYOUT)
         circuit.buttons(("Browse...", self.browse))
+        self.circuit = circuit
 
         environment = self.form("Hardware and noise")
         defaults = lib.default_codesign_environment()
@@ -1381,11 +1484,12 @@ class CodesignTab(Tab):
 
     def basic_design(self):
         path = self.qasm_var.get()
+        layout = self.circuit.get_str("layout")
         element = self.app.ion.element
         environment = self._environment()
 
         def work():
-            return lib.Codesign(path, element, environment)
+            return lib.Codesign(path, element, environment, layout=layout)
 
         def done(codesign):
             if self.codesign is not None:
@@ -1520,11 +1624,10 @@ class CodesignTab(Tab):
                 color = "tab:orange" if trap.is_rf(e) else "tab:blue"
                 ax.add_patch(PolygonPatch(polygon[:, :2], closed=True, facecolor=colors.to_rgba(color, 0.25), edgecolor=color, linewidth=0.5))
             draw_photonics(ax, trap)
-            layout = self.codesign.layout()
-            for name, position in (("gate", layout["gate_position"]), ("measure", layout["measure_position"])):
-                ax.plot(position[0], position[1], marker="x", color="black", linestyle="none")
-                ax.annotate(name, (position[0], position[1]), textcoords="offset points", xytext=(4, 4), fontsize=7)
-            ax.set_xlim(-260, 260)
+            zones = trap.zones()
+            draw_zones(ax, zones)
+            reach = max([260.0] + [abs(zone.position[0]) + 60.0 for zone in zones])
+            ax.set_xlim(-reach, reach)
             ax.set_ylim(-200, 200)
             ax.set_aspect("equal")
             ax.legend(fontsize=6, loc="lower left")

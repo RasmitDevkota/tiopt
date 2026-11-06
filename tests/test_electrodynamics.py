@@ -10,7 +10,7 @@ from scipy import integrate
 import tiopt
 from tiopt import lib
 
-libname = pathlib.Path(__file__).resolve().parent / "../libtiopt.so"
+libname = pathlib.Path(__file__).resolve().parent / "../build/libtiopt.so"
 libtiopt = ctypes.CDLL(str(libname))
 
 

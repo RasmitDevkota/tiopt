@@ -14,6 +14,7 @@
 #include "test_analysis.h"
 #include "test_acceleration.h"
 #include "test_codesign.h"
+#include "test_zones.h"
 
 // Run every test suite, returning the number of failed tests
 int main()
@@ -58,6 +59,9 @@ int main()
 
 	printf("--- Breaking into test_codesign...\n");
 	n_failures += test_all_codesign(atol);
+
+	printf("--- Breaking into test_zones...\n");
+	n_failures += test_all_zones(atol);
 
 	if (n_failures == 0)
 		printf("--- Completed all tests!\n");

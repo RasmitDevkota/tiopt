@@ -20,11 +20,7 @@
 #include "analysis.h"
 #include "circuits.h"
 #include "transport.h"
-
-// Every operation of the circuit is run in one of these zones, which are spaced evenly along the trap axis: ions are
-// loaded into and wait in the first zone, and gates and detection happen in the gate and measurement zones, with empty
-// zones in between to keep the wells apart
-#define N_CODESIGN_ZONES 5
+#include "zones.h"
 
 // Number of single-qubit rotations which, with one Molmer-Sorensen gate, make up a controlled Pauli gate
 #define ROTATIONS_PER_TWO_QUBIT_GATE 4
@@ -169,20 +165,32 @@ static double zone_x
 	return (zone - 0.5 * (codesign->n_zones - 1)) * codesign->parameters.zone_spacing;
 }
 
-// How far the outermost zone lies beyond the region where wells can be made: over the segmented electrodes (less a
-// segment at each end) and within the spherical harmonics expansions (µm); zero or less if every zone fits
+// How far the outermost zone lies beyond the region where wells can be made, within the spherical harmonics expansions
+// (µm); zero or less if every zone fits
 static double zone_overflow
 (
 	struct Codesign *codesign
 )
 {
-	double segments = 0.5 * codesign->environment.n_segments * codesign->parameters.segment_width - codesign->parameters.segment_width;
 	double expansions = MIN(-SPH_CENTER_X(0), SPH_CENTER_X(NSPH_X - 1));
 
-	return zone_x(codesign, codesign->n_zones - 1) - MIN(segments, expansions);
+	return zone_x(codesign, codesign->n_zones - 1) - expansions;
 }
 
-// Summarize the circuit in a QASM file by the layers of the transport program which runs it on the zones of the trap,
+// Number of DC segments on each side of the trap: enough to make wells beyond the outermost zones, and at least as
+// many as the environment asks for
+static int trap_segments
+(
+	struct Codesign *codesign
+)
+{
+	double span = (codesign->n_zones - 1) * codesign->parameters.zone_spacing;
+	int n_segments = (int) ceil(span / codesign->parameters.segment_width - 1E-9) + 2;
+
+	return MAX(n_segments, codesign->environment.n_segments);
+}
+
+// Summarize the circuit in a QASM file by the layers of the transport program which runs it on the zones of the layout,
 // with distances in zone spacings
 static int summarize_circuit
 (
@@ -204,23 +212,40 @@ static int summarize_circuit
 
 	int n_ions = circuit_graph->n_ions;
 
-	// A zone where ions are loaded and wait, a gate zone and a measurement zone, separated by empty zones which ions
-	// pass through
-	enum ZoneType zone_types[N_CODESIGN_ZONES] = { LOAD_ZONE | STORAGE_ZONE, EMPTY_ZONE, GATE_ZONE, EMPTY_ZONE, MEASURE_ZONE };
-	int zone_capacities[N_CODESIGN_ZONES] = { n_ions, 1, 2, 1, n_ions };
+	if (parse_zone_layout(codesign->layout, n_ions, &codesign->n_zones, &codesign->zone_types, &codesign->zone_capacities) != 0)
+	{
+		free_circuit_graph(circuit_graph);
+		return 1;
+	}
 
-	codesign->n_zones = N_CODESIGN_ZONES;
-	codesign->gate_zone = 2;
-	codesign->measure_zone = 4;
+	int n_zones = codesign->n_zones;
+
+	codesign->gate_zone = -1;
+	codesign->measure_zone = -1;
+	for (int z = n_zones - 1; z >= 0; z--)
+	{
+		if (codesign->zone_types[z] & GATE_ZONE)
+			codesign->gate_zone = z;
+
+		if (codesign->zone_types[z] & MEASURE_ZONE)
+			codesign->measure_zone = z;
+	}
+
+	if (codesign->gate_zone < 0)
+	{
+		printf("ERROR: The zone layout '%s' needs a gate zone\n", codesign->layout);
+		free_circuit_graph(circuit_graph);
+		return 1;
+	}
 
 	// Zones one unit apart, so that distances come out in zone spacings
 	struct TrapGraph trap_graph;
-	generate_linear_trap_graph(N_CODESIGN_ZONES, zone_types, zone_capacities, 0.0, N_CODESIGN_ZONES - 1, ION_HEIGHT, &trap_graph);
+	generate_linear_trap_graph(n_zones, codesign->zone_types, codesign->zone_capacities, 0.0, n_zones - 1, ION_HEIGHT, &trap_graph);
 
 	struct TransportProgram *transport_program = calloc(1, sizeof(struct TransportProgram));
 	if (generate_transport_schedule(&trap_graph, circuit_graph, transport_program) == NULL)
 	{
-		printf("ERROR: Failed to schedule the circuit on the trap\n");
+		printf("ERROR: Failed to schedule the circuit on the zones '%s'\n", codesign->layout);
 
 		free_trap_graph(&trap_graph);
 		free_circuit_graph(circuit_graph);
@@ -239,58 +264,106 @@ static int summarize_circuit
 	codesign->layer_single_qubit_gates = calloc(n_layers, sizeof(int));
 	codesign->layer_two_qubit_gates = calloc(n_layers, sizeof(int));
 	codesign->layer_measurements = calloc(n_layers, sizeof(int));
+	codesign->layer_gate_zones = calloc(n_layers, sizeof(int));
+	codesign->layer_measure_zones = calloc(n_layers, sizeof(int));
+	codesign->static_well_zones = calloc(n_zones, sizeof(int));
 
-	double *ion_x = malloc(n_ions * sizeof(double));
+	// Follow the ions as the scheduler moves them: into the zones of their operations, and back into storage after each
+	// layer (which the transport program does not record, so the distance an ion moves back is added to its next
+	// transport)
+	struct ZoneNode *zones = trap_graph.zone_nodes;
+	for (int z = 0; z < n_zones; z++)
+		zones[z].zone_occupancy = 0;
+
+	struct ZoneNode **ion_states = malloc(n_ions * sizeof(struct ZoneNode*));
+	double *pending_distances = calloc(n_ions, sizeof(double));
+	double *positions_before = malloc(n_ions * sizeof(double));
 	for (int i = 0; i < n_ions; i++)
-		ion_x[i] = transport_program->initial_positions[i][0];
+	{
+		ion_states[i] = &zones[MIN(MAX((int) lround(transport_program->initial_positions[i][0]), 0), n_zones - 1)];
+		ion_states[i]->zone_occupancy++;
+	}
 
-	// The zones occupied at once by the most wells, which must all be held while ions wait for others
-	codesign->n_static_wells = 1;
-	codesign->static_well_zones[0] = (int) lround(ion_x[0]);
+	int *gate_zones_used = malloc(n_zones * sizeof(int));
+	int *measure_zones_used = malloc(n_zones * sizeof(int));
+
+	codesign->n_static_wells = 0;
 
 	for (int layer = 1; layer <= n_layers; layer++)
 	{
+		memset(gate_zones_used, 0, n_zones * sizeof(int));
+		memset(measure_zones_used, 0, n_zones * sizeof(int));
+
 		for (int t = 0; t < transport_program->n_transports; t++)
 		{
 			if (circuit_graph->layer_idxs[t] != layer)
 				continue;
 
 			struct InstructionNode *node = &circuit_graph->instruction_nodes[t];
+			int destination = MIN(MAX((int) lround(transport_program->destinations[t][0]), 0), n_zones - 1);
 
 			for (int i = 0; i < transport_program->transport_n_targets_list[t]; i++)
 			{
 				int ion = transport_program->transport_targets_list[t][i] - 1;
 
-				codesign->layer_distances[layer - 1] = MAX(codesign->layer_distances[layer - 1], fabs(transport_program->destinations[t][0] - ion_x[ion]));
-				ion_x[ion] = transport_program->destinations[t][0];
+				double distance = pending_distances[ion] + fabs(zones[destination].position[0] - ion_states[ion]->position[0]);
+				codesign->layer_distances[layer - 1] = MAX(codesign->layer_distances[layer - 1], distance);
+				pending_distances[ion] = 0.0;
+
+				ion_states[ion]->zone_occupancy--;
+				zones[destination].zone_occupancy++;
+				ion_states[ion] = &zones[destination];
 			}
 
 			if (node->operation_type & DETECT)
+			{
 				codesign->layer_measurements[layer - 1] += node->n_target_ions;
-			else if (node->n_target_ions >= 2)
-				codesign->layer_two_qubit_gates[layer - 1]++;
+				measure_zones_used[destination] = 1;
+			}
 			else
-				codesign->layer_single_qubit_gates[layer - 1]++;
+			{
+				if (node->n_target_ions >= 2)
+					codesign->layer_two_qubit_gates[layer - 1]++;
+				else
+					codesign->layer_single_qubit_gates[layer - 1]++;
 
-			int occupied[N_CODESIGN_ZONES] = { 0 };
-			for (int i = 0; i < n_ions; i++)
-				occupied[MIN(MAX((int) lround(ion_x[i]), 0), N_CODESIGN_ZONES - 1)] = 1;
+				gate_zones_used[destination] = 1;
+			}
 
+			// The zones occupied at once by the most wells, which must all be held while ions wait for others
 			int n_occupied = 0;
-			for (int z = 0; z < N_CODESIGN_ZONES; z++)
-				n_occupied += occupied[z];
+			for (int z = 0; z < n_zones; z++)
+				n_occupied += (zones[z].zone_occupancy > 0);
 
 			if (n_occupied > codesign->n_static_wells)
 			{
 				codesign->n_static_wells = 0;
-				for (int z = 0; z < N_CODESIGN_ZONES; z++)
-					if (occupied[z])
+				for (int z = 0; z < n_zones; z++)
+					if (zones[z].zone_occupancy > 0)
 						codesign->static_well_zones[codesign->n_static_wells++] = z;
 			}
 		}
+
+		for (int z = 0; z < n_zones; z++)
+		{
+			codesign->layer_gate_zones[layer - 1] += gate_zones_used[z];
+			codesign->layer_measure_zones[layer - 1] += measure_zones_used[z];
+		}
+
+		for (int i = 0; i < n_ions; i++)
+			positions_before[i] = ion_states[i]->position[0];
+
+		release_operation_zones(&trap_graph, ion_states, n_ions);
+
+		for (int i = 0; i < n_ions; i++)
+			pending_distances[i] += fabs(ion_states[i]->position[0] - positions_before[i]);
 	}
 
-	free(ion_x);
+	free(positions_before);
+	free(gate_zones_used);
+	free(measure_zones_used);
+	free(pending_distances);
+	free(ion_states);
 	free_transport_program(transport_program);
 	free_trap_graph(&trap_graph);
 	free_circuit_graph(circuit_graph);
@@ -298,8 +371,8 @@ static int summarize_circuit
 	return 0;
 }
 
-// Make the trap match the trap parameters (solving its electrodynamics again only if its geometry changed), find the
-// RF nulls at the gate and measurement zones, and set up its photonics to address them
+// Make the trap match the trap parameters (solving its electrodynamics again only if its geometry changed), place the
+// zones of the layout at the RF null, and set up the photonics which address them
 static int update_trap
 (
 	struct Codesign *codesign
@@ -308,48 +381,72 @@ static int update_trap
 	struct CodesignParameters *parameters = &codesign->parameters;
 	struct CodesignEnvironment *environment = &codesign->environment;
 
-	if (codesign->solved_segment_width != parameters->segment_width)
+	int n_segments = trap_segments(codesign);
+
+	if (codesign->solved_segment_width != parameters->segment_width || codesign->solved_n_segments != n_segments)
 	{
 		free_trap(&codesign->trap);
 
 		codesign->solved_segment_width = 0.0;
 
-		if (generate_trap_from_preset(LINEAR_SURFACE_TRAP, environment->n_segments, parameters->segment_width, &codesign->trap) != 0)
+		if (generate_trap_from_preset(LINEAR_SURFACE_TRAP, n_segments, parameters->segment_width, &codesign->trap) != 0)
 			return 1;
 
 		solve_trap_electrodynamics(&codesign->trap, ANALYTICAL, NULL);
 
 		codesign->solved_segment_width = parameters->segment_width;
+		codesign->solved_n_segments = n_segments;
 		codesign->primitive_status = -1;
 	}
 
-	codesign->trap.V_RF = parameters->V_RF;
-	codesign->trap.Omega_RF = parameters->Omega_RF;
+	struct Trap *trap = &codesign->trap;
 
-	double gate_position[3] = { zone_x(codesign, codesign->gate_zone), 0.0, ION_HEIGHT };
-	double measure_position[3] = { zone_x(codesign, codesign->measure_zone), 0.0, ION_HEIGHT };
-	find_rf_null(&codesign->trap, &gate_position, 100);
-	find_rf_null(&codesign->trap, &measure_position, 100);
+	trap->V_RF = parameters->V_RF;
+	trap->Omega_RF = parameters->Omega_RF;
 
-	memcpy(codesign->gate_position, gate_position, sizeof(gate_position));
-	memcpy(codesign->measure_position, measure_position, sizeof(measure_position));
+	allocate_zones(trap, codesign->n_zones);
+	for (int z = 0; z < codesign->n_zones; z++)
+	{
+		double position[3] = { zone_x(codesign, z), 0.0, ION_HEIGHT };
+		find_rf_null(trap, &position, 100);
 
-	if (add_trap_photonics(&codesign->trap, codesign->gate_position, codesign->measure_position) != 0)
+		set_trap_zone(trap, z, codesign->zone_types[z], codesign->zone_capacities[z], position);
+	}
+
+	memcpy(codesign->gate_position, (*trap->zones)[codesign->gate_zone].position, sizeof(codesign->gate_position));
+
+	if (codesign->measure_zone >= 0)
+		memcpy(codesign->measure_position, (*trap->zones)[codesign->measure_zone].position, sizeof(codesign->measure_position));
+
+	if (add_zone_photonics(trap, codesign->ion.element) != 0)
 		return 1;
 
-	struct GratingCoupler *qubit_grating = &(*codesign->trap.grating_couplers)[QUBIT_BEAM];
-	qubit_grating->length = parameters->grating_length;
-	qubit_grating->width = parameters->grating_width;
-	qubit_grating->power = environment->qubit_power;
+	for (int g = 0; g < trap->n_grating_couplers; g++)
+	{
+		struct GratingCoupler *grating = &(*trap->grating_couplers)[g];
 
-	(*codesign->trap.grating_couplers)[DETECTION_BEAM].power = environment->detection_power;
+		if (grating->beam == QUBIT_BEAM)
+		{
+			grating->length = parameters->grating_length;
+			grating->width = parameters->grating_width;
+			grating->power = environment->qubit_power;
+		}
+		else if (grating->beam == DETECTION_BEAM)
+		{
+			grating->power = environment->detection_power;
+		}
+	}
 
 	// Dark counts scale with the area of the detector
-	struct Detector *detector = &(*codesign->trap.detectors)[0];
-	detector->width = parameters->detector_size;
-	detector->length = parameters->detector_size;
-	detector->quantum_efficiency = environment->detector_efficiency;
-	detector->dark_count_rate = environment->dark_count_density * parameters->detector_size * parameters->detector_size;
+	for (int d = 0; d < trap->n_detectors; d++)
+	{
+		struct Detector *detector = &(*trap->detectors)[d];
+
+		detector->width = parameters->detector_size;
+		detector->length = parameters->detector_size;
+		detector->quantum_efficiency = environment->detector_efficiency;
+		detector->dark_count_rate = environment->dark_count_density * parameters->detector_size * parameters->detector_size;
+	}
 
 	return 0;
 }
@@ -400,14 +497,10 @@ static void evaluate_trap_metrics
 	// Voltages which hold wells in every zone the circuit occupies at once (as when ions wait while others are gated);
 	// wells closer together than several ion heights need large voltages to be controlled separately
 	int n_wells = codesign->n_static_wells;
-	double well_positions[N_CODESIGN_ZONES][3];
+	double (*well_positions)[3] = malloc(MAX(n_wells, 1) * sizeof(double[3]));
 	for (int w = 0; w < n_wells; w++)
-	{
-		well_positions[w][0] = zone_x(codesign, codesign->static_well_zones[w]);
-		well_positions[w][1] = 0.0;
-		well_positions[w][2] = ION_HEIGHT;
-		find_rf_null(trap, &well_positions[w], 100);
-	}
+		for (int k = 0; k < 3; k++)
+			well_positions[w][k] = (*trap->zones)[codesign->static_well_zones[w]].position[k];
 
 	metrics->static_voltage = HUGE_VAL;
 	if (solve_waveform(trap, m, q, 1, n_wells, well_positions, parameters->omega_axial, 0.0, voltages) == 0)
@@ -416,9 +509,12 @@ static void evaluate_trap_metrics
 		for (int e = trap->n_electrodes_rf; e < trap->n_electrodes; e++)
 			metrics->static_voltage = MAX(metrics->static_voltage, fabs(voltages[e]));
 	}
+
+	free(well_positions);
 }
 
-// Light delivered to the gate and measurement zones, and the fidelity of detection
+// Light delivered to the gate and measurement zones, and the fidelity of detection; every gate zone has its own qubit
+// beam, and the gates are as good as those of the worst gate zone
 static void evaluate_photonics_metrics
 (
 	struct Codesign *codesign,
@@ -431,50 +527,83 @@ static void evaluate_photonics_metrics
 	struct CodesignEnvironment *environment = &codesign->environment;
 
 	double m = ion_mass(ion);
-
-	struct GratingCoupler *qubit_grating = &(*trap->grating_couplers)[QUBIT_BEAM];
-
-	double intensity;
-	double k_vector[3];
-	evaluate_grating_beam(qubit_grating, codesign->gate_position, &intensity, &k_vector);
-
 	double wavelength_SD = 2 * PI * C_LIGHT / ion->omega_SD;
-	metrics->rabi_frequency = parameters->rabi_fraction * rabi_frequency_from_intensity(ion->gamma_SD, wavelength_SD, intensity);
-
 	double axis[3] = { 1.0, 0.0, 0.0 };
-	metrics->lamb_dicke_parameter = lamb_dicke_parameter(k_vector, axis, m, parameters->omega_axial);
-
-	// Ions waiting in the neighboring zones see the tail of the beam
-	metrics->crosstalk = 0.0;
-	for (int side = -1; side <= 1; side += 2)
-	{
-		double neighbor[3] = { codesign->gate_position[0] + side * parameters->zone_spacing, codesign->gate_position[1], codesign->gate_position[2] };
-
-		double neighbor_intensity;
-		evaluate_grating_beam(qubit_grating, neighbor, &neighbor_intensity, NULL);
-
-		metrics->crosstalk = MAX(metrics->crosstalk, neighbor_intensity / intensity);
-	}
 
 	// Rabi frequencies scale as the square root of the intensity, so the relative change of the Rabi frequency when
 	// the ion drifts (or is left off target by transport) is half the change in the logarithm of the intensity, in the
 	// most sensitive direction
 	double drift = sqrt(pow(environment->position_drift, 2) + pow(codesign->position_error, 2));
+
+	metrics->rabi_frequency = 0.0;
+	metrics->lamb_dicke_parameter = 0.0;
+	metrics->crosstalk = 0.0;
 	metrics->rabi_sensitivity = 0.0;
-	for (int k = 0; k < 3; k++)
+
+	int first = 1;
+	for (int g = 0; g < trap->n_grating_couplers; g++)
 	{
-		double displaced[3] = { codesign->gate_position[0], codesign->gate_position[1], codesign->gate_position[2] };
-		displaced[k] += drift;
+		struct GratingCoupler *qubit_grating = &(*trap->grating_couplers)[g];
 
-		double displaced_intensity;
-		evaluate_grating_beam(qubit_grating, displaced, &displaced_intensity, NULL);
+		if (qubit_grating->beam != QUBIT_BEAM || qubit_grating->zone < 0 || qubit_grating->zone >= trap->n_zones)
+			continue;
 
-		metrics->rabi_sensitivity = MAX(metrics->rabi_sensitivity, 0.5 * fabs(log(displaced_intensity / intensity)));
+		double *position = (*trap->zones)[qubit_grating->zone].position;
+
+		double intensity;
+		double k_vector[3];
+		evaluate_grating_beam(qubit_grating, position, &intensity, &k_vector);
+
+		double rabi_frequency = parameters->rabi_fraction * rabi_frequency_from_intensity(ion->gamma_SD, wavelength_SD, intensity);
+
+		if (first || rabi_frequency < metrics->rabi_frequency)
+		{
+			metrics->rabi_frequency = rabi_frequency;
+			metrics->lamb_dicke_parameter = lamb_dicke_parameter(k_vector, axis, m, parameters->omega_axial);
+		}
+
+		first = 0;
+
+		// Ions waiting in every other zone see the tail of the beam
+		for (int z = 0; z < trap->n_zones; z++)
+		{
+			if (z == qubit_grating->zone)
+				continue;
+
+			double other_intensity;
+			evaluate_grating_beam(qubit_grating, (*trap->zones)[z].position, &other_intensity, NULL);
+
+			metrics->crosstalk = MAX(metrics->crosstalk, other_intensity / intensity);
+		}
+
+		for (int k = 0; k < 3; k++)
+		{
+			double displaced[3] = { position[0], position[1], position[2] };
+			displaced[k] += drift;
+
+			double displaced_intensity;
+			evaluate_grating_beam(qubit_grating, displaced, &displaced_intensity, NULL);
+
+			metrics->rabi_sensitivity = MAX(metrics->rabi_sensitivity, 0.5 * fabs(log(displaced_intensity / intensity)));
+		}
 	}
 
-	// Detection by fluorescence on the S-P transition, driven half a linewidth below resonance; the dark state decays
-	// at the rate of the D state
-	struct GratingCoupler *detection_grating = &(*trap->grating_couplers)[DETECTION_BEAM];
+	// Detection by fluorescence on the S-P transition in the first measurement zone, driven half a linewidth below
+	// resonance; the dark state decays at the rate of the D state. Without a measurement zone, nothing is measured
+	metrics->detection_fidelity = 1.0;
+
+	struct GratingCoupler *detection_grating = NULL;
+	for (int g = 0; g < trap->n_grating_couplers; g++)
+		if ((*trap->grating_couplers)[g].beam == DETECTION_BEAM && (*trap->grating_couplers)[g].zone == codesign->measure_zone)
+			detection_grating = &(*trap->grating_couplers)[g];
+
+	struct Detector *detector = NULL;
+	for (int d = 0; d < trap->n_detectors; d++)
+		if ((*trap->detectors)[d].zone == codesign->measure_zone)
+			detector = &(*trap->detectors)[d];
+
+	if (codesign->measure_zone < 0 || detection_grating == NULL || detector == NULL)
+		return;
 
 	double detection_intensity;
 	evaluate_grating_beam(detection_grating, codesign->measure_position, &detection_intensity, NULL);
@@ -483,15 +612,13 @@ static void evaluate_photonics_metrics
 	double s = detection_intensity / saturation_intensity(ion->gamma_SP, wavelength_SP);
 	double scattering_rate = compute_scattering_rate(ion->gamma_SP, s, -0.5 * ion->gamma_SP);
 
-	struct Detector *detector = &(*trap->detectors)[0];
 	double photon_rate = scattering_rate * compute_collection_efficiency(detector, codesign->measure_position);
 
 	metrics->detection_fidelity = compute_detection_fidelity(photon_rate, detector->dark_count_rate, ion->gamma_SD, parameters->detection_time, NULL);
 }
 
-// Optimize and simulate the shuttle primitive, which moves an ion from the zone before the gate zone into the gate
-// zone; the results are kept until a parameter the primitive depends on changes. Returns 1 if the waveform could not
-// be found
+// Optimize and simulate the shuttle primitive, which moves an ion from a neighboring zone into the first gate zone; the
+// results are kept until a parameter the primitive depends on changes. Returns 1 if the waveform could not be found
 static int update_primitive
 (
 	struct Codesign *codesign,
@@ -519,11 +646,26 @@ static int update_primitive
 	memcpy(codesign->primitive_key, key, sizeof(key));
 	codesign->primitive_status = 1;
 
+	// With a single zone, ions never move
+	if (codesign->n_zones < 2)
+	{
+		codesign->shuttle_excitation = 0.0;
+		codesign->position_error = 0.0;
+		codesign->frequency_error = 0.0;
+		codesign->peak_voltage = 0.0;
+		codesign->primitive_status = 0;
+
+		return 0;
+	}
+
 	double m = ion_mass(ion);
 	double q = ion_charge(ion);
 
-	double start[3] = { zone_x(codesign, codesign->gate_zone - 1), 0.0, ION_HEIGHT };
-	find_rf_null(trap, &start, 100);
+	int start_zone = (codesign->gate_zone > 0) ? codesign->gate_zone - 1 : codesign->gate_zone + 1;
+
+	double start[3];
+	for (int k = 0; k < 3; k++)
+		start[k] = (*trap->zones)[start_zone].position[k];
 
 	double *end = codesign->gate_position;
 
@@ -668,8 +810,8 @@ static void evaluate_circuit_metrics
 	double t_detect = parameters->detection_time;
 
 	// Run through the layers of the circuit: the ions are cooled at the start and are not cooled again, so every shuttle
-	// adds its excitation (treated as thermal) and the mode heats throughout. Operations in a layer share the single gate
-	// zone and measurement zone, so they run one after another
+	// adds its excitation (treated as thermal) and the mode heats throughout. The operations of a layer are spread over
+	// the gate and measurement zones it uses, and run one after another within each zone
 	double time = 0.0;
 	double n_shuttles = 0.0;
 	double n_bar_sum = 0.0;
@@ -692,7 +834,8 @@ static void evaluate_circuit_metrics
 		n_two_qubit_gates += n_two;
 		n_measurements += n_detect;
 
-		time += n_single * t_1 + n_two * (t_2 + ROTATIONS_PER_TWO_QUBIT_GATE * t_1) + n_detect * t_detect;
+		double gate_time = n_single * t_1 + n_two * (t_2 + ROTATIONS_PER_TWO_QUBIT_GATE * t_1);
+		time += gate_time / MAX(codesign->layer_gate_zones[layer], 1) + n_detect * t_detect / MAX(codesign->layer_measure_zones[layer], 1);
 	}
 
 	metrics->circuit_duration = time;
@@ -995,17 +1138,25 @@ int optimize_codesign_stage
 	return result;
 }
 
-// Set up the co-design of a trap for the circuit in a QASM file (stage 0), starting from the given environment and
-// parameters (or the defaults, if they are NULL); returns NULL if the circuit cannot be read or the design evaluated
+// Set up the co-design of a trap for the circuit in a QASM file (stage 0) on the zones of a layout (see
+// parse_zone_layout, or DEFAULT_CODESIGN_LAYOUT if it is NULL), starting from the given environment and parameters (or
+// the defaults, if they are NULL); the zone spacing is reduced if the layout does not fit within the spherical
+// harmonics expansions. Returns NULL if the circuit cannot be read or scheduled on the layout, or if the layout cannot
+// fit at the smallest zone spacing
 struct Codesign* create_codesign
 (
 	char *element,
 	char *qasm_filename,
+	char *layout,
 	struct CodesignEnvironment *environment,
 	struct CodesignParameters *parameters
 )
 {
 	struct Codesign *codesign = calloc(1, sizeof(struct Codesign));
+
+	const char *zone_layout = (layout != NULL) ? layout : DEFAULT_CODESIGN_LAYOUT;
+	codesign->layout = malloc(strlen(zone_layout) + 1);
+	strcpy(codesign->layout, zone_layout);
 
 	if (generate_ion_from_preset(element, &codesign->ion) != 0)
 	{
@@ -1031,6 +1182,32 @@ struct Codesign* create_codesign
 	{
 		free_codesign(codesign);
 		return NULL;
+	}
+
+	// Bring the zones closer together if they reach beyond the expansions, as far as the transport stage allows
+	if (zone_overflow(codesign) > 0.0 && codesign->n_zones > 1)
+	{
+		double expansions = MIN(-SPH_CENTER_X(0), SPH_CENTER_X(NSPH_X - 1));
+		double half_span = 0.5 * (codesign->n_zones - 1) * codesign->parameters.zone_spacing;
+		double min_spacing = 0.0;
+		for (int v = 0; v < N_CODESIGN_VARIABLES; v++)
+			if (codesign_variables[v].offset == offsetof(struct CodesignParameters, zone_spacing))
+				min_spacing = codesign_variables[v].lower_bound;
+
+		codesign->parameters.zone_spacing = expansions / (0.5 * (codesign->n_zones - 1));
+
+		if (codesign->parameters.zone_spacing < min_spacing)
+		{
+			double min_half_span = 0.5 * (codesign->n_zones - 1) * min_spacing;
+
+			printf("ERROR: The %d zones of '%s' span %.0f µm even %.0f µm apart, beyond the spherical harmonics expansions (%.0f µm on either side of the trap center); rebuild tiopt with make clean && make DEFINES=\"-DNSPH_X=%d\" to fit them\n", codesign->n_zones, codesign->layout, 2 * min_half_span, min_spacing, expansions, required_nsph_x(-min_half_span, min_half_span));
+
+			free_codesign(codesign);
+			return NULL;
+		}
+
+		// Wells closer than several ion heights need large voltages to be held at once
+		printf("WARNING: Zones brought %.1f µm apart to fit within the spherical harmonics expansions, which may need large voltages; rebuild tiopt with make clean && make DEFINES=\"-DNSPH_X=%d\" to keep them %.0f µm apart\n", codesign->parameters.zone_spacing, required_nsph_x(-half_span, half_span), 2 * half_span / (codesign->n_zones - 1));
 	}
 
 	evaluate_codesign(codesign, 1, &codesign->metrics);
@@ -1103,6 +1280,12 @@ void free_codesign
 	free(codesign->layer_single_qubit_gates);
 	free(codesign->layer_two_qubit_gates);
 	free(codesign->layer_measurements);
+	free(codesign->layer_gate_zones);
+	free(codesign->layer_measure_zones);
+	free(codesign->layout);
+	free(codesign->zone_types);
+	free(codesign->zone_capacities);
+	free(codesign->static_well_zones);
 	free(codesign->records);
 	free_trap(&codesign->trap);
 	free(codesign);

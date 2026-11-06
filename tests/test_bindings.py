@@ -117,10 +117,11 @@ def test_photonics_preset_and_detector_round_trip(tmp_path):
     trap = tiopt.Trap.from_preset(5, 40.0, photonics=True)
     gratings = trap.grating_couplers()
     detectors = trap.detectors()
-    assert len(gratings) == len(tiopt.PHOTONICS_BEAMS)
-    assert len(detectors) == 1
+    # The gate zone gets the qubit and quench beams, and the measurement zone the detection and repump beams
+    assert [(g.beam, g.zone) for g in gratings] == [("qubit", 0), ("detection", 1), ("repump", 1), ("quench", 0)]
+    assert len(detectors) == 1 and detectors[0].zone == 1
     wavelengths = sorted(g.struct.waveguide.wavelength for g in gratings)
-    assert wavelengths == pytest.approx([0.396959, 0.729347, 0.854209, 0.866214])
+    assert wavelengths == pytest.approx([0.396959, 0.729347, 0.854444, 0.866452])
     # The detector lies beneath the measurement zone, two segments from the center
     assert detectors[0].position == pytest.approx([80.0, 0.0, 0.0])
 
