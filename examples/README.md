@@ -43,7 +43,7 @@ The scripts in the `python` directory can be run from any directory, e.g. `pytho
 
 # The co-design flow
 
-The co-design flow (`codesign.c`, `tiopt.Codesign`, the Co-design tab of the GUI, and option 8 of `./tiopt`) designs a linear trap with integrated photonics for a circuit on the zones of a zone layout through the following stages:
+The co-design flow (`codesign.c`, `tiopt.Codesign`, the Co-design tab of the GUI, and option 8 of `./build/tiopt`) designs a linear trap with integrated photonics for a circuit on the zones of a zone layout through the following stages:
 
 0. Basic design of everything, i.e. the trap, the photonics focused on every zone which needs them, the transport program which runs the circuit on the zones (by default `load+storage, empty, gate, empty, measure`, i.e. load/storage, gate, and measurement zones separated by empty zones, but any layout with a gate zone can be given), and the waveform of the shuttle primitive into the first gate zone
 1. Trap - segment width and RF drive

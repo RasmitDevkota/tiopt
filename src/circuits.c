@@ -7,6 +7,7 @@
 
 #include "defs.h"
 #include "data_structures.h"
+#include "transport.h"
 
 // Add the qubits referenced by a QASM operand to a list of target ions (which start at 1), where an operand without an
 // index (e.g. "qreg") refers to every qubit; returns the new number of targets
@@ -142,6 +143,18 @@ void schedule_arrival_times
 	struct TransportProgram *transport_program
 )
 {
+	schedule_arrival_times_in_rounds(circuit_graph, transport_program, circuit_graph->layer_idxs);
+}
+
+// As schedule_arrival_times, but with the transports in the given rounds (which start at 1) instead of the layers of
+// the circuit, as when a layer does not fit in the zones at once
+void schedule_arrival_times_in_rounds
+(
+	struct CircuitGraph *circuit_graph,
+	struct TransportProgram *transport_program,
+	const int *rounds
+)
+{
 	int n_ions = transport_program->n_ions;
 
 	double (*ion_positions)[3] = malloc(n_ions * sizeof(double[3]));
@@ -151,7 +164,7 @@ void schedule_arrival_times
 
 	int max_layer = 0;
 	for (int i = 0; i < circuit_graph->n_instruction_nodes; i++)
-		max_layer = MAX(max_layer, circuit_graph->layer_idxs[i]);
+		max_layer = MAX(max_layer, rounds[i]);
 
 	double time = 0.0;
 	for (int layer = 1; layer <= max_layer; layer++)
@@ -161,7 +174,7 @@ void schedule_arrival_times
 
 		for (int i = 0; i < circuit_graph->n_instruction_nodes; i++)
 		{
-			if (circuit_graph->layer_idxs[i] != layer)
+			if (rounds[i] != layer)
 				continue;
 
 			for (int t = 0; t < transport_program->transport_n_targets_list[i]; t++)
@@ -179,7 +192,7 @@ void schedule_arrival_times
 
 		for (int i = 0; i < circuit_graph->n_instruction_nodes; i++)
 		{
-			if (circuit_graph->layer_idxs[i] != layer)
+			if (rounds[i] != layer)
 				continue;
 
 			transport_program->arrival_times[i] = time;
@@ -351,6 +364,41 @@ void release_operation_zones
 	int n_ions
 )
 {
+	release_ions(trap_graph, ion_states, n_ions, NULL);
+}
+
+// Record a move of an ion in a schedule trace, if there is one
+void record_ion_move
+(
+	struct ScheduleTrace *trace,
+	struct TrapGraph *trap_graph,
+	int ion,
+	struct ZoneNode *from,
+	struct ZoneNode *to,
+	int transport
+)
+{
+	if (trace == NULL)
+		return;
+
+	if (trace->n_moves == trace->max_moves)
+	{
+		trace->max_moves = MAX(2 * trace->max_moves, 64);
+		trace->moves = realloc(trace->moves, trace->max_moves * sizeof(struct IonMove));
+	}
+
+	trace->moves[trace->n_moves++] = (struct IonMove) { ion, (int) (from - trap_graph->zone_nodes), (int) (to - trap_graph->zone_nodes), transport };
+}
+
+// As release_operation_zones, but recording the moves in trace (if it is not NULL)
+void release_ions
+(
+	struct TrapGraph *trap_graph,
+	struct ZoneNode **ion_states,
+	int n_ions,
+	struct ScheduleTrace *trace
+)
+{
 	enum ZoneType destinations[3] = { STORAGE_ZONE, LOAD_ZONE, EMPTY_ZONE };
 
 	for (int i = 0; i < n_ions; i++)
@@ -367,6 +415,7 @@ void release_operation_zones
 
 			if (destination != NULL && destination != zone)
 			{
+				record_ion_move(trace, trap_graph, target, zone, destination, -1);
 				zone->zone_occupancy--;
 				destination->zone_occupancy++;
 				ion_states[i] = destination;

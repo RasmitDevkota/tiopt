@@ -67,13 +67,19 @@ Finally, tiopt can be built by running the following commands inside the `tiopt`
 make clean
 make
 ```
-which produce the `tiopt` executable and the `libtiopt.so` shared library (which the Python interface uses).
+which produce the `build/tiopt` executable and the `build/libtiopt.so` shared library (which the Python interface uses). The repository is laid out as follows:
+
+- `src` - the C sources of the library and executable, and the OpenCL kernels
+- `include` - the C headers, which programs using the library should add to their include path
+- `build` - object files, the executable, and the shared library (made by `make` and removed by `make clean`)
+- `python` - the Python bindings and GUI
+- `tests`, `examples`, `demos`, and `docs` - the test suites, examples, notebooks, and documentation
 
 # Usage
 
 tiopt can be started by running
 ```
-./tiopt
+./build/tiopt
 ```
 which offers a menu of demos: transport schedules, the electrodynamics of `trap.data`, transport waveforms and dynamics, trap optimization, grating coupler design, quantum gates, the co-design flow, and the design of a trap for a zone layout and of a junction.
 
@@ -225,6 +231,8 @@ Grating couplers also take `azimuth`, `fill_factor`, `etch_depth`, `length`, `wi
 
 # Modules
 
+The sources are in `src` and their headers in `include`.
+
 - `electrodynamics.c` - relaxation, spectral, and analytical (gapless plane) solvers, Driscoll-Healy sampling, spherical harmonic expansions, potentials, the pseudopotential, normal modes, and the RF null
 - `traps.c`, `io.c`, and `ions.c` - the preset library (linear, junction, and point traps, and linear traps for zone layouts), integrated photonics for every zone, allocation of traps, trap files, and ion species
 - `zones.c` - zone layouts, zone types, and the zones of traps
@@ -239,7 +247,7 @@ Grating couplers also take `azimuth`, `fill_factor`, `etch_depth`, `length`, `wi
 - `acceleration.c` and `kernels.cl` - threads and the OpenCL backend (which is loaded at runtime) with its kernels
 - `bindings.c` - helpers for the Python bindings
 
-Note that the transport programs from `generate_transport_schedule` record each transport into the zone of an operation, but not the transports of the ions back into storage after each layer (which the co-design flow adds to the next transport of each ion).
+`generate_transport_schedule` splits each layer of a circuit into rounds of operations which fit in the zones at once, which run one after another (`SCHEDULE_BASELINE` in `generate_transport_schedule_strategy` runs every layer at once instead, which only gives a valid schedule if every layer fits). Note that the transport programs record each transport into the zone of an operation, but not the transports of the ions back into storage after each round; `generate_transport_schedule_strategy` records them in a `ScheduleTrace`, along with the round of each transport, and the co-design flow adds them to the next transport of each ion. Circuits with gates which the parser does not know are rejected, and the scheduler prints the occupancy of the zones as it goes only if `TIOPT_SCHEDULE_VERBOSE` is set.
 
 # Co-design
 
@@ -277,7 +285,7 @@ Most of the speedup on one thread comes from the algorithms themselves - the spe
 
 ## GPUs
 
-Relaxation, potential maps (`evaluate_trap_potential_batch`, `evaluate_potential_energy_batch`, and `Trap.potential` and `Trap.potential_energy` in Python), and ensembles (`simulate_ensemble`) can run on a GPU through OpenCL in double precision. tiopt only loads `libOpenCL.so.1` once a GPU is requested, so it builds and runs without any GPU software, and everything falls back to the CPU if no device is found. The GPU can be selected with `set_compute_device(OPENCL_DEVICE)` in C, `tiopt.set_device("opencl")` in Python, the toolbar of the GUI, or `TIOPT_DEVICE=opencl ./tiopt`.
+Relaxation, potential maps (`evaluate_trap_potential_batch`, `evaluate_potential_energy_batch`, and `Trap.potential` and `Trap.potential_energy` in Python), and ensembles (`simulate_ensemble`) can run on a GPU through OpenCL in double precision. tiopt only loads `libOpenCL.so.1` once a GPU is requested, so it builds and runs without any GPU software, and everything falls back to the CPU if no device is found. The GPU can be selected with `set_compute_device(OPENCL_DEVICE)` in C, `tiopt.set_device("opencl")` in Python, the toolbar of the GUI, or `TIOPT_DEVICE=opencl ./build/tiopt`.
 
 For NVIDIA GPUs, the proprietary driver includes an OpenCL platform (`nvidia-opencl-icd` or the equivalent for your distribution, along with `ocl-icd`). For AMD GPUs (e.g. the Radeon RX 5700 XT), an OpenCL runtime such as the one from ROCm needs to be installed, but the 5700 XT (gfx1010) is not officially supported by ROCm, so it's worth checking that the runtime finds it. Either way, `clinfo` should list the device with `cl_khr_fp64`. If there are several devices, `TIOPT_OPENCL_DEVICE=n` picks the n-th device with double precision, and `TIOPT_OPENCL_ANY_DEVICE=1` also allows CPU devices (such as PoCL, which the tests use to check the kernels without a GPU).
 

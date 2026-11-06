@@ -2,6 +2,8 @@
 
 #include "data_structures.h"
 
+struct ScheduleTrace;
+
 int add_qasm_targets
 (
 	char *token,
@@ -28,6 +30,13 @@ void schedule_arrival_times
 (
 	struct CircuitGraph *circuit_graph,
 	struct TransportProgram *transport_program
+);
+
+void schedule_arrival_times_in_rounds
+(
+	struct CircuitGraph *circuit_graph,
+	struct TransportProgram *transport_program,
+	const int *rounds
 );
 
 void generate_linear_trap_graph
@@ -70,4 +79,22 @@ void release_operation_zones
 	struct TrapGraph *trap_graph,
 	struct ZoneNode **ion_states,
 	int n_ions
+);
+
+void record_ion_move
+(
+	struct ScheduleTrace *trace,
+	struct TrapGraph *trap_graph,
+	int ion,
+	struct ZoneNode *from,
+	struct ZoneNode *to,
+	int transport
+);
+
+void release_ions
+(
+	struct TrapGraph *trap_graph,
+	struct ZoneNode **ion_states,
+	int n_ions,
+	struct ScheduleTrace *trace
 );

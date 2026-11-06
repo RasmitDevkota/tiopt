@@ -2,16 +2,14 @@
 trap.data
 
 # tiopt output files
+/build/
 *.o
-/tiopt
-/libtiopt.so
 /tests/tiopt-test
 /tests/tiopt-benchmark
 /examples/c/basic_trap
 /codesign.trap
 /designed.trap
 /examples/output/
-kernels_cl.h
 
 # GMSH output files
 meshes/
