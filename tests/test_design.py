@@ -74,8 +74,8 @@ def test_photonics_for_every_species(element):
     beams = {grating.beam for grating in trap.grating_couplers()}
     expected = {beam for beam in tiopt.PHOTONICS_BEAMS if tiopt.photonics_beam(element, beam) is not None}
     assert beams == expected
-    # 9Be+ has no metastable D states to quench, and photoionizes with two photons from one beam
-    assert ("quench" in beams) == (element != "9Be+")
+    # 9Be+ and 25Mg+ have no metastable D states to quench, and photoionize with two photons from one beam
+    assert ("quench" in beams) == (element not in ("9Be+", "25Mg+"))
     for grating in trap.grating_couplers():
         waveguide, power = tiopt.photonics_beam(element, grating.beam)
         assert grating.struct.waveguide.wavelength == pytest.approx(waveguide.wavelength)

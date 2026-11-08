@@ -15,9 +15,16 @@ The `traps` directory has the following traps:
 
 Trap files can be loaded with `Trap.from_file` in Python, `generate_trap_from_file` in C, or the Trap tab of the GUI, and they can be written with `Trap.save` or `write_trap_to_file`. Lines starting with `#` are comments. Every trap can also be exported to a GDSII layout with `Trap.save_gds` (or the Trap tab of the GUI) for layout tools such as KLayout.
 
+# Designs
+
+The `designs` directory has trap designs for the Trap builder tab of the GUI (or `tiopt.builder.load_design`):
+- `linear_two_sections.json` - two 500 µm linear sections joined end to end, with a loading and storage zone, a gate zone, and a measurement zone, grating couplers for the qubit, detection, and photoionization beams, and a detector beneath the measurement zone
+- `curved_bend.json` - a 90° curved section (with a radius of 160 µm) between two 250 µm linear sections, with a gate zone in the middle of the curve and a loading and storage zone and a measurement zone on the linear sections, along with their photonics
+- `racetrack.json` - a racetrack like those of Quantinuum, i.e. two U-turns joined by two linear sections, with a gate zone on each linear section and a loading and storage zone and a measurement zone on the turns (it reaches beyond the spherical harmonic expansions of the default build, so its RF nulls and CTC paths can be found but wells can only be made with a build with more spheres)
+
 # Circuits
 
-The `circuits` directory has the following OpenQASM circuits, which act on a register named `qreg` so that the scheduler and the co-design flow can read them:
+The Quantum tab of the GUI has its own examples (a Bell pair, GHZ states, Grover search, Bernstein-Vazirani, a quantum Fourier transform, a Toffoli gate, and the circuit of the test suite), which can be edited and then simulated, scheduled, and co-designed for. The `circuits` directory has the following OpenQASM circuits, which act on a register named `qreg` so that the C scheduler and the co-design flow can read them directly:
 - `bell.qasm` - a Bell pair, i.e. a Hadamard and a CNOT followed by measurements of both qubits
 - `ghz3.qasm` - a three-qubit GHZ state
 - `ghz5.qasm` - a five-qubit GHZ state, which needs more shuttling
@@ -36,6 +43,8 @@ The scripts in the `python` directory can be run from any directory, e.g. `pytho
 - `08_acceleration.py` - time potential maps and ensembles with different numbers of threads and on an OpenCL device
 - `09_trap_design.py` - design a linear trap for a zone layout with photonics for every zone, evaluate every zone of the design, list the beams of each species, and export the design to trap, GDSII, and SVG files (the `--layout`, `--zone-spacing`, and `--species` options can be used to try other designs)
 - `10_junctions.py` - generate the X, Y, and T junction presets and a five-way junction, and find the pseudopotential barrier an ion crosses turning from one arm into another
+- `11_crystals_and_gates.py` - make a 1 MHz well with tilted radial axes from objectives, analyze it beyond the pseudopotential (Floquet frequencies, depth, and anharmonicity), hold a mixed-species crystal in it, find the control voltages of the multipoles, and design a Mølmer-Sørensen gate which closes both axial modes of two ions and stays good when they drift
+- `12_fabrication_and_architectures.py` - check the design rules of a trap for a zone layout, open gaps between its electrodes and solve it with the boundary element method, route waveguides to its gratings, share one beam between its gate zones with a directional coupler, and compile a GHZ circuit onto QCCD architectures with traps of several capacities
 
 # C
 
@@ -43,7 +52,7 @@ The scripts in the `python` directory can be run from any directory, e.g. `pytho
 
 # The co-design flow
 
-The co-design flow (`codesign.c`, `tiopt.Codesign`, the Co-design tab of the GUI, and option 8 of `./tiopt`) designs a linear trap with integrated photonics for a circuit on the zones of a zone layout through the following stages:
+The full co-design (`tiopt.system` and the default flow of the Co-design tab) designs the whole system from the inputs of every tab of the GUI at once (see the [README](../README.md#full-co-design)). The co-design flow of the C library (`codesign.c`, `tiopt.Codesign`, the "Linear trap flow" of the Co-design tab, and option 8 of `./tiopt`) designs a linear trap with integrated photonics for a circuit on the zones of a zone layout through the following stages:
 
 0. Basic design of everything, i.e. the trap, the photonics focused on every zone which needs them, the transport program which runs the circuit on the zones (by default `load+storage, empty, gate, empty, measure`, i.e. load/storage, gate, and measurement zones separated by empty zones, but any layout with a gate zone can be given), and the waveform of the shuttle primitive into the first gate zone
 1. Trap - segment width and RF drive

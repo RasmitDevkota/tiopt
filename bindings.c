@@ -215,6 +215,31 @@ void evaluate_potential_energy_batch
 		evaluate_potential_energy(trap, m, q, voltages, positions[p], &U[p], NULL, NULL);
 }
 
+// Evaluate the potential energy (J) of an ion, including the pseudopotential, with its gradient (J/µm) and (if H_U is
+// not NULL) its Hessian (J/µm^2) at many positions, e.g. for the forces on every ion of a crystal; returns the number of
+// positions outside of the spherical harmonic expansions
+int evaluate_potential_energy_derivatives_batch
+(
+	struct Trap *trap,
+	const double m,
+	const double q,
+	double *voltages,
+	int n_points,
+	double (*positions)[3],
+	double *U,
+	double (*grad_U)[3],
+	double (*H_U)[3][3]
+)
+{
+	int n_outside = 0;
+
+	#pragma omp parallel for schedule(static) reduction(+:n_outside)
+	for (int p = 0; p < n_points; p++)
+		n_outside += (evaluate_potential_energy(trap, m, q, voltages, positions[p], &U[p], grad_U[p], (H_U != NULL) ? H_U[p] : NULL) != 0);
+
+	return n_outside;
+}
+
 // Evaluate the analytical (gapless plane) potential of an electrode at many positions
 void evaluate_electrode_potential_analytical_batch
 (

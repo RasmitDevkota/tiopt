@@ -972,6 +972,29 @@ WARN_LOGFILE           =
 INPUT                  = . \
                          python/tiopt/lib.py \
                          python/tiopt/export.py \
+                         python/tiopt/builder.py \
+                         python/tiopt/components.py \
+                         python/tiopt/confinement.py \
+                         python/tiopt/shapes.py \
+                         python/tiopt/circuits.py \
+                         python/tiopt/pulses.py \
+                         python/tiopt/scheduling.py \
+                         python/tiopt/system.py \
+                         python/tiopt/crystals.py \
+                         python/tiopt/stability.py \
+                         python/tiopt/multipoles.py \
+                         python/tiopt/voltages.py \
+                         python/tiopt/hardware.py \
+                         python/tiopt/dynamics.py \
+                         python/tiopt/levels.py \
+                         python/tiopt/multimode.py \
+                         python/tiopt/gates.py \
+                         python/tiopt/analytic.py \
+                         python/tiopt/qccd.py \
+                         python/tiopt/photonic_circuits.py \
+                         python/tiopt/drc.py \
+                         python/tiopt/bem.py \
+                         python/tiopt/topology.py \
                          examples/README.md
 
 # This tag can be used to specify the character encoding of the source files

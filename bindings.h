@@ -34,6 +34,19 @@ void evaluate_potential_energy_batch
 	double *U
 );
 
+int evaluate_potential_energy_derivatives_batch
+(
+	struct Trap *trap,
+	const double m,
+	const double q,
+	double *voltages,
+	int n_points,
+	double (*positions)[3],
+	double *U,
+	double (*grad_U)[3],
+	double (*H_U)[3][3]
+);
+
 void evaluate_electrode_potential_analytical_batch
 (
 	struct Electrode *electrode,

@@ -31,6 +31,8 @@ struct PulseProgram* allocate_pulse_program
 	pulse_program->pulse_phases = calloc(n_pulses, sizeof(double));
 	pulse_program->pulse_n_targets_list = calloc(n_pulses, sizeof(int));
 	pulse_program->pulse_targets_list = calloc(n_pulses, sizeof(int *));
+	pulse_program->pulse_shapes = calloc(n_pulses, sizeof(enum PulseShape));
+	pulse_program->pulse_shape_parameters = calloc(n_pulses, sizeof(double[2]));
 
 	return pulse_program;
 }
@@ -47,6 +49,8 @@ void free_pulse_program
 	for (int p = 0; p < pulse_program->n_pulses; p++)
 		free(pulse_program->pulse_targets_list[p]);
 
+	free(pulse_program->pulse_shape_parameters);
+	free(pulse_program->pulse_shapes);
 	free(pulse_program->pulse_targets_list);
 	free(pulse_program->pulse_n_targets_list);
 	free(pulse_program->pulse_phases);
@@ -55,6 +59,62 @@ void free_pulse_program
 	free(pulse_program->pulse_times);
 	free(pulse_program->pulse_frequencies);
 	free(pulse_program);
+}
+
+// Envelope of a pulse of the given shape and duration (s) at time t (s) after it starts, which peaks at 1 (see enum
+// PulseShape)
+double pulse_envelope
+(
+	enum PulseShape shape,
+	const double parameters[2],
+	const double duration,
+	const double t
+)
+{
+	if (t < 0.0 || t > duration)
+		return 0.0;
+
+	double rise = MIN(MAX(parameters[0], 0.0), duration);
+	double fall = MIN(MAX(parameters[1], 0.0), duration - rise);
+
+	switch (shape)
+	{
+		case TRAPEZOID_PULSE:
+			if (t < rise)
+				return t / rise;
+			if (t > duration - fall)
+				return (duration - t) / fall;
+			return 1.0;
+
+		case COSINE_PULSE:
+			if (t < rise)
+				return pow(sin(0.5 * PI * t / rise), 2);
+			if (t > duration - fall)
+				return pow(sin(0.5 * PI * (duration - t) / fall), 2);
+			return 1.0;
+
+		case GAUSSIAN_PULSE:
+		{
+			double sigma = parameters[0];
+			double edge = (sigma > 0.0) ? exp(-0.125 * duration * duration / (sigma * sigma)) : 1.0;
+
+			// A Gaussian much wider than the pulse is a square pulse
+			if (edge > 1 - 1E-12)
+				return 1.0;
+
+			return (exp(-0.5 * pow((t - 0.5 * duration) / sigma, 2)) - edge) / (1 - edge);
+		}
+
+		case BLACKMAN_PULSE:
+		{
+			double u = t / duration;
+
+			return 0.42 - 0.5 * cos(2 * PI * u) + 0.08 * cos(4 * PI * u);
+		}
+
+		default:
+			return 1.0;
+	}
 }
 
 // Lamb-Dicke parameter eta = |k . b| sqrt(hbar / (2 m omega)) of a laser with wavevector k (1/m) coupling to a mode with
@@ -210,6 +270,7 @@ struct MasterEquation
 	struct CouplingTerm *terms; // implicitly, length n_terms
 	double *detunings; // detuning of each pulse from the sideband it drives (rad/s); implicitly, length n_pulses
 	int *active; // whether each pulse is on during the current segment; implicitly, length n_pulses
+	struct PulseProgram *pulse_program; // start times, durations and envelopes of the pulses
 	double complex *phases; // e^(-i Delta t) of each active pulse at the current time; implicitly, length n_pulses
 	double decay_rate;
 	double dephasing_rate;
@@ -279,8 +340,15 @@ static void compute_master_equation_derivative
 	int n_motion = eq->n_motion;
 	double complex *K = eq->K;
 
+	struct PulseProgram *pulse_program = eq->pulse_program;
+
 	for (int p = 0; p < eq->n_pulses; p++)
+	{
 		eq->phases[p] = eq->active[p] ? cexp(-I * eq->detunings[p] * t) : 0.0;
+
+		if (eq->active[p] && pulse_program->pulse_shapes != NULL && pulse_program->pulse_shapes[p] != SQUARE_PULSE)
+			eq->phases[p] *= pulse_envelope(pulse_program->pulse_shapes[p], pulse_program->pulse_shape_parameters[p], pulse_program->pulse_durations[p], t - pulse_program->pulse_times[p]);
+	}
 
 	// K = H rho, one row at a time
 	#pragma omp parallel for schedule(static) if (dim >= 48)
@@ -502,6 +570,7 @@ int simulate_pulse_program
 	eq.n_motion = n_motion;
 	eq.dim = dim;
 	eq.n_pulses = n_pulses;
+	eq.pulse_program = pulse_program;
 	eq.decay_rate = ion->gamma_SD;
 	eq.dephasing_rate = dephasing_rate;
 	eq.heating_rate = mode->heating_rate;
@@ -624,10 +693,26 @@ int simulate_pulse_program
 	double *event_times = find_event_times(pulse_program, &n_event_times);
 
 	int n_breakpoints = 0;
-	double *breakpoints = malloc((n_event_times + n_samples + 1) * sizeof(double));
+	double *breakpoints = malloc((n_event_times + n_samples + 2 * n_pulses + 1) * sizeof(double));
 	for (int i = 0; i < n_event_times; i++)
 		if (event_times[i] <= t_end)
 			breakpoints[n_breakpoints++] = event_times[i];
+
+	// The envelopes of trapezoidal and cosine pulses have kinks where they stop rising and start falling
+	for (int p = 0; p < n_pulses; p++)
+	{
+		enum PulseShape shape = (pulse_program->pulse_shapes != NULL) ? pulse_program->pulse_shapes[p] : SQUARE_PULSE;
+
+		if (shape != TRAPEZOID_PULSE && shape != COSINE_PULSE)
+			continue;
+
+		double duration = pulse_program->pulse_durations[p];
+		double rise = MIN(MAX(pulse_program->pulse_shape_parameters[p][0], 0.0), duration);
+		double fall = MIN(MAX(pulse_program->pulse_shape_parameters[p][1], 0.0), duration - rise);
+
+		breakpoints[n_breakpoints++] = pulse_program->pulse_times[p] + rise;
+		breakpoints[n_breakpoints++] = pulse_program->pulse_times[p] + duration - fall;
+	}
 	for (int s = 0; s < n_samples; s++)
 		breakpoints[n_breakpoints++] = sample_times[s];
 

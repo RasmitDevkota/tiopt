@@ -86,6 +86,39 @@ void sample_dh1_analytical
 	double grid[NLAT][NLON]
 );
 
+void evaluate_panel_potentials
+(
+	const int n_points,
+	double (*points)[3],
+	const int n_panels,
+	const int max_vertices,
+	int *n_vertices,
+	double (*vertices)[2],
+	double *areas,
+	double (*centroids)[2],
+	double (*moments)[3],
+	double *sizes,
+	const int n_images,
+	double *image_heights,
+	double *image_signs,
+	const double near_factor,
+	const int n_sets,
+	double *charges,
+	double *potentials
+);
+
+void sphere_sample_positions
+(
+	double (*positions)[3]
+);
+
+void expand_electrode_samples
+(
+	struct Trap *trap,
+	const int e,
+	double *samples
+);
+
 extern void compute_shcoeffs_cmplx(double *grid, int *nlat, int *nlon, int *lmax, double *alm);
 extern void compute_shcoeffs_real(double *grid, int *nlat, int *nlon, int *lmax, double *alm);
 

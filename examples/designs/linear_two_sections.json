@@ -1,0 +1,100 @@
+{
+ "parts": [
+  {
+   "kind": "linear_section",
+   "x": -250,
+   "y": 0,
+   "rotation": 0.0,
+   "params": {
+    "n_segments": 10,
+    "segment_width": 50.0,
+    "center_width": 66.0,
+    "rail_width": 58.66666666666667,
+    "segment_length": 55.0
+   }
+  },
+  {
+   "kind": "linear_section",
+   "x": 250,
+   "y": 0,
+   "rotation": 0.0,
+   "params": {
+    "n_segments": 10,
+    "segment_width": 50.0,
+    "center_width": 66.0,
+    "rail_width": 58.66666666666667,
+    "segment_length": 55.0
+   }
+  },
+  {
+   "kind": "zone",
+   "x": -100,
+   "y": 0,
+   "rotation": 0.0,
+   "params": {
+    "types": "load+storage",
+    "capacity": 0
+   }
+  },
+  {
+   "kind": "zone",
+   "x": 50,
+   "y": 0,
+   "rotation": 0.0,
+   "params": {
+    "types": "gate",
+    "capacity": 0
+   }
+  },
+  {
+   "kind": "zone",
+   "x": 150,
+   "y": 0,
+   "rotation": 0.0,
+   "params": {
+    "types": "measure",
+    "capacity": 0
+   }
+  },
+  {
+   "kind": "grating",
+   "x": 10,
+   "y": 30,
+   "rotation": 0.0,
+   "params": {
+    "beam": "qubit",
+    "zone": -1
+   }
+  },
+  {
+   "kind": "grating",
+   "x": 110,
+   "y": -30,
+   "rotation": 0.0,
+   "params": {
+    "beam": "detection",
+    "zone": -1
+   }
+  },
+  {
+   "kind": "grating",
+   "x": -140,
+   "y": 30,
+   "rotation": 0.0,
+   "params": {
+    "beam": "photoionization",
+    "zone": -1
+   }
+  },
+  {
+   "kind": "detector",
+   "x": 150,
+   "y": 0,
+   "rotation": 0.0,
+   "params": {
+    "width": 50.0,
+    "length": 50.0
+   }
+  }
+ ]
+}

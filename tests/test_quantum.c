@@ -24,6 +24,7 @@ int test_all_quantum
 	result += test_simulate_rabi_oscillations(atol);
 	result += test_simulate_dissipation(atol);
 	result += test_simulate_ramsey(atol);
+	result += test_simulate_shaped_pulses(atol);
 	result += test_simulate_molmer_sorensen_gate(atol);
 
 	return result;
@@ -315,6 +316,57 @@ int test_simulate_ramsey
 	pulse_program->pulse_phases[2] = PI;
 	simulate_pulse_program(&ion, &mode, pulse_program, rabi_frequencies, etas, 0.0, 2, sample_times, excited_populations, mean_phonon_numbers, NULL);
 	result += check_error("Ramsey phase reverses excitation", excited_populations[1], 1E-6);
+
+	free_pulse_program(pulse_program);
+
+	return result;
+}
+
+int test_simulate_shaped_pulses
+(
+	double atol
+)
+{
+	struct IonParameters ion;
+	generate_ion_from_preset("40Ca+", &ion);
+	ion.gamma_SD = 0.0;
+
+	struct MotionalMode mode = { 2 * PI * 1E6, 0, 0.0, { 0.0, 0.0 }, 0.0 };
+
+	// Envelopes peak at 1, start and end at 0 (except square pulses), and ramp as their shape says
+	double duration = 10E-6;
+	double ramps[2] = { 2E-6, 3E-6 };
+	double width[2] = { 2E-6, 0.0 };
+	double none[2] = { 0.0, 0.0 };
+
+	double error = 0.0;
+	error = MAX(error, fabs(pulse_envelope(TRAPEZOID_PULSE, ramps, duration, 1E-6) - 0.5));
+	error = MAX(error, fabs(pulse_envelope(TRAPEZOID_PULSE, ramps, duration, 8.5E-6) - 0.5));
+	error = MAX(error, fabs(pulse_envelope(COSINE_PULSE, ramps, duration, 1E-6) - 0.5));
+	error = MAX(error, fabs(pulse_envelope(GAUSSIAN_PULSE, width, duration, 0.5 * duration) - 1.0));
+	error = MAX(error, fabs(pulse_envelope(GAUSSIAN_PULSE, width, duration, 0.0)));
+	error = MAX(error, fabs(pulse_envelope(BLACKMAN_PULSE, none, duration, 0.5 * duration) - 1.0));
+	error = MAX(error, fabs(pulse_envelope(BLACKMAN_PULSE, none, duration, duration)));
+	error = MAX(error, fabs(pulse_envelope(SQUARE_PULSE, none, duration, -1E-9)));
+
+	int result = check_error("pulse envelopes", error, 1E-12);
+
+	// A triangular pulse (which ramps up for half of it and down for the other half) has half the area of a square pulse
+	// of the same peak, so it inverts the qubit at twice the Rabi frequency
+	double rabi_frequencies[1] = { 2 * PI / duration };
+	double detunings[1] = { 0.0 };
+	double durations[1] = { duration };
+	double etas[1] = { 0.0 };
+	struct PulseProgram *pulse_program = make_pulse_program(&ion, 1, 1, detunings, durations, NULL);
+	pulse_program->pulse_shapes[0] = TRAPEZOID_PULSE;
+	pulse_program->pulse_shape_parameters[0][0] = 0.5 * duration;
+	pulse_program->pulse_shape_parameters[0][1] = 0.5 * duration;
+
+	double sample_times[2];
+	double excited_populations[2];
+	double mean_phonon_numbers[2];
+	simulate_pulse_program(&ion, &mode, pulse_program, rabi_frequencies, etas, 0.0, 2, sample_times, excited_populations, mean_phonon_numbers, NULL);
+	result += check_error("triangular pulse of twice the Rabi frequency inverts the qubit", 1 - excited_populations[1], 1E-6);
 
 	free_pulse_program(pulse_program);
 

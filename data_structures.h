@@ -189,6 +189,19 @@ struct TransportProgram
 	double (*initial_positions)[3]; // position of each ion before the first transport; implicitly, length n_ions-by-3
 };
 
+// Shapes of the envelope of a laser pulse, which peaks at 1; the parameters of trapezoidal and cosine pulses are their
+// rise and fall times (which make a triangle or a sine squared pulse if they add up to the duration), and the parameter
+// of a Gaussian pulse is its width (it is shifted down so that it starts and ends at zero)
+enum PulseShape
+{
+	SQUARE_PULSE,
+	TRAPEZOID_PULSE,
+	GAUSSIAN_PULSE,
+	COSINE_PULSE,
+	BLACKMAN_PULSE,
+	N_PULSE_SHAPES,
+};
+
 struct PulseProgram
 {
 	int n_ions;
@@ -200,6 +213,8 @@ struct PulseProgram
 	int *pulse_n_targets_list; // implicitly, length n_pulses
 	int **pulse_targets_list; // implicitly, length n_pulses-by-[pulse_n_targets] (starts at 1)
 	double *pulse_phases; // implicitly, length n_pulses
+	enum PulseShape *pulse_shapes; // implicitly, length n_pulses
+	double (*pulse_shape_parameters)[2]; // parameters of the envelope of each pulse (s), see enum PulseShape; implicitly, length n_pulses-by-2
 };
 
 struct TransportWaveform

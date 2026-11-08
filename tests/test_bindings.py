@@ -36,7 +36,10 @@ def test_constants():
     assert x_min < 0 < x_max
 
 
-@pytest.mark.parametrize("element, mass_u", [("40Ca+", 39.962591), ("88Sr+", 87.905612), ("171Yb+", 170.936323), ("9Be+", 9.012183)])
+@pytest.mark.parametrize("element, mass_u", [
+    ("40Ca+", 39.962591), ("43Ca+", 42.958766), ("88Sr+", 87.905612), ("171Yb+", 170.936323), ("9Be+", 9.012183),
+    ("25Mg+", 24.985837), ("133Ba+", 132.906007), ("137Ba+", 136.905827), ("138Ba+", 137.905247),
+])
 def test_ion_presets(element, mass_u):
     ion = tiopt.Ion(element)
     assert ion.mass == pytest.approx(mass_u * 1.66053906660e-27)

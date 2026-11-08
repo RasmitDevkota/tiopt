@@ -1,8 +1,10 @@
-"""Export trap designs to GDSII and SVG files, and import electrodes and zones from GDSII files.
+"""Export trap designs to GDSII and SVG files, import electrodes and zones from GDSII files, and export potentials to
+VTK files.
 
 GDSII files hold the electrodes, integrated photonics, and zones of a trap for layout tools such as KLayout, with one
 layer for each kind of shape (see LAYERS and GRATING_LAYERS). Coordinates are in µm, with a database unit of 1 nm.
-SVG files draw the same shapes for figures and quick looks at a design.
+SVG files draw the same shapes for figures and quick looks at a design. VTK files hold the potentials of a trap on a
+grid of points (like the output of the bem package), which ParaView and VisIt can show in 3D.
 """
 
 import math
@@ -257,4 +259,62 @@ def write_svg(trap, path, scale=2.0, margin=20.0):
         lines.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="4" fill="black"/>')
         lines.append(f'<text x="{x:.2f}" y="{y - 8:.2f}" font-family="sans-serif" font-size="12" text-anchor="middle">{zone.types}</text>')
     lines.append("</svg>")
+    Path(path).write_text("\n".join(lines) + "\n")
+
+
+def write_vtk(trap, path, ion=None, voltages=None, bounds=None, spacing=2.0, electrodes=False):
+    """Write potentials of a trap on a grid of points to a legacy VTK file (structured points), which ParaView and
+    VisIt can read.
+
+    Args:
+        trap: Solved trap.
+        path: VTK file to write.
+        ion: Ion species, for the pseudopotential and the potential energy (in meV).
+        voltages: DC voltages (V) of the potential energy, if any.
+        bounds: (x_min, x_max, y_min, y_max, z_min, z_max) of the grid (µm), which by default spans the region of the
+            spherical harmonic expansions around the electrodes.
+        spacing: Spacing of the grid (µm).
+        electrodes: Specifies whether to also write the potential of every electrode at 1 V.
+    """
+    from .lib import E_CHARGE, constant, expansion_region
+
+    if bounds is None:
+        x_min, x_max, y_min, y_max = expansion_region()
+        z_top = constant("SPH_CENTER_Z_MIN") + constant("SPH_SPACING") * (constant("NSPH_Z") - 1) + constant("SPH_R")
+        bounds = (x_min, x_max, y_min, y_max, 5.0, z_top)
+    x = np.arange(bounds[0], bounds[1] + spacing / 2, spacing)
+    y = np.arange(bounds[2], bounds[3] + spacing / 2, spacing)
+    z = np.arange(bounds[4], bounds[5] + spacing / 2, spacing)
+    # VTK orders the points with x varying fastest
+    Z, Y, X = np.meshgrid(z, y, x, indexing="ij")
+    points = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=-1)
+    fields = []
+    if ion is not None and trap.n_rf > 0:
+        fields.append(("pseudopotential_meV", trap.pseudopotential(ion, points) / E_CHARGE * 1e3))
+        if voltages is not None:
+            U = trap.potential_energy(ion, points, voltages)
+            fields.append(("potential_energy_meV", (U - U.min()) / E_CHARGE * 1e3))
+    if voltages is not None:
+        fields.append(("dc_potential_V", trap.potential(points, voltages)))
+    if trap.n_rf > 0:
+        fields.append(("rf_potential_per_volt", trap.potential(points, trap.rf_weights())))
+    if electrodes:
+        for e in range(trap.n_electrodes):
+            weights = trap.zero_voltages()
+            weights[e] = 1.0
+            fields.append((f"electrode_{e}", trap.potential(points, weights)))
+    lines = [
+        "# vtk DataFile Version 3.0",
+        "tiopt potentials (lengths in um)",
+        "ASCII",
+        "DATASET STRUCTURED_POINTS",
+        f"DIMENSIONS {len(x)} {len(y)} {len(z)}",
+        f"ORIGIN {x[0]:.6g} {y[0]:.6g} {z[0]:.6g}",
+        f"SPACING {spacing:.6g} {spacing:.6g} {spacing:.6g}",
+        f"POINT_DATA {len(points)}",
+    ]
+    for name, values in fields:
+        lines.append(f"SCALARS {name} double 1")
+        lines.append("LOOKUP_TABLE default")
+        lines.extend(" ".join(f"{v:.9g}" for v in values[k:k + 8]) for k in range(0, len(values), 8))
     Path(path).write_text("\n".join(lines) + "\n")

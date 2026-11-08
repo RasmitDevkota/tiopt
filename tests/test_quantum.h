@@ -30,6 +30,11 @@ int test_simulate_ramsey
 	double atol
 );
 
+int test_simulate_shaped_pulses
+(
+	double atol
+);
+
 int test_simulate_molmer_sorensen_gate
 (
 	double atol

@@ -597,6 +597,188 @@ void sample_dh1_analytical
 	}
 }
 
+// Integral of 1/r over a polygon with counterclockwise vertices (µm) in the plane z = z_plane at a point (µm), which is
+// the potential of the polygon with unit charge density up to the factor 1/(4 pi epsilon_0)
+static double polygon_charge_integral
+(
+	const int n_vertices,
+	double (*vertices)[2],
+	const double z_plane,
+	double point[3]
+)
+{
+	double h = fabs(point[2] - z_plane);
+	double total = 0.0;
+
+	for (int k = 0; k < n_vertices; k++)
+	{
+		double *a = vertices[k];
+		double *b = vertices[(k + 1) % n_vertices];
+
+		double ex = b[0] - a[0];
+		double ey = b[1] - a[1];
+		double length = sqrt(ex*ex + ey*ey);
+		if (length < 1E-12)
+			continue;
+
+		double tx = ex / length;
+		double ty = ey / length;
+
+		// Signed distance of the projected point from the line of the edge (positive inside the polygon), and the
+		// coordinates of the ends of the edge along it
+		double ax = a[0] - point[0];
+		double ay = a[1] - point[1];
+		double bx = b[0] - point[0];
+		double by = b[1] - point[1];
+		double d = ax * ty - ay * tx;
+		double s1 = ax * tx + ay * ty;
+		double s2 = bx * tx + by * ty;
+		double R1 = sqrt(ax*ax + ay*ay + h*h);
+		double R2 = sqrt(bx*bx + by*by + h*h);
+		double R0 = d*d + h*h;
+
+		if (fabs(d) > 1E-12)
+			total += d * log(MAX(s2 + R2, 1E-300) / MAX(s1 + R1, 1E-300));
+
+		total -= h * (atan2(d * s2, R0 + h * R2) - atan2(d * s1, R0 + h * R1));
+	}
+
+	return total;
+}
+
+// Evaluate the potentials at points (µm) of panels with uniform charge densities in planes of constant height (e.g.
+// the panels of the boundary element method in tiopt.bem, with images in grounded planes at image_heights with
+// image_signs), using the closed form of each panel within near_factor times its size of a point and its monopole and
+// quadrupole (from its area, centroid, and second moments of area J_xx, J_yy, J_xy) beyond. The vertices of panel p are
+// vertices[p * max_vertices] onwards. If charges is NULL, potentials receives the potential of every panel with unit
+// charge density at every point (n_points x n_panels), and otherwise the sums over the panels for each of n_sets sets
+// of charges (n_points x n_sets, with charges given as n_panels x n_sets)
+void evaluate_panel_potentials
+(
+	const int n_points,
+	double (*points)[3],
+	const int n_panels,
+	const int max_vertices,
+	int *n_vertices,
+	double (*vertices)[2],
+	double *areas,
+	double (*centroids)[2],
+	double (*moments)[3],
+	double *sizes,
+	const int n_images,
+	double *image_heights,
+	double *image_signs,
+	const double near_factor,
+	const int n_sets,
+	double *charges,
+	double *potentials
+)
+{
+	int n_out = (charges != NULL) ? n_sets : n_panels;
+
+	#pragma omp parallel for schedule(dynamic, 32)
+	for (int i = 0; i < n_points; i++)
+	{
+		double *out = &potentials[(size_t) i * n_out];
+		for (int s = 0; s < n_out; s++)
+			out[s] = 0.0;
+
+		for (int m = 0; m < n_images; m++)
+			for (int p = 0; p < n_panels; p++)
+			{
+				double rx = points[i][0] - centroids[p][0];
+				double ry = points[i][1] - centroids[p][1];
+				double rz = points[i][2] - image_heights[m];
+				double R2 = rx*rx + ry*ry + rz*rz;
+				double R = sqrt(R2);
+
+				double value;
+				if (R > near_factor * sizes[p])
+				{
+					double J_xx = moments[p][0];
+					double J_yy = moments[p][1];
+					double J_xy = moments[p][2];
+					value = areas[p] / R + (3 * (rx*rx * J_xx + 2 * rx * ry * J_xy + ry*ry * J_yy) - R2 * (J_xx + J_yy)) / (2 * R2 * R2 * R);
+				}
+				else
+					value = polygon_charge_integral(n_vertices[p], &vertices[(size_t) p * max_vertices], image_heights[m], points[i]);
+
+				value *= image_signs[m];
+
+				if (charges == NULL)
+					out[p] += value;
+				else
+				{
+					double *q = &charges[(size_t) p * n_sets];
+					for (int s = 0; s < n_sets; s++)
+						out[s] += value * q[s];
+				}
+			}
+	}
+}
+
+// Positions (µm) of the Driscoll-Healy samples on every sphere, sphere by sphere in the order of VLM_SLICE and then by
+// colatitude and longitude as in sample_dh1_analytical, i.e. NSPH_X * NSPH_Y * NSPH_Z * NLAT * NLON positions at which
+// an external solver (e.g. a boundary element method) can evaluate the potential of an electrode for
+// expand_electrode_samples
+void sphere_sample_positions
+(
+	double (*positions)[3]
+)
+{
+	for (int sx = 0; sx < NSPH_X; sx++)
+		for (int sy = 0; sy < NSPH_Y; sy++)
+			for (int sz = 0; sz < NSPH_Z; sz++)
+			{
+				int s = (sx * NSPH_Y + sy) * NSPH_Z + sz;
+
+				for (int i = 0; i < NLAT; i++)
+				{
+					double phi = (double)i/NLAT * PI;
+
+					for (int j = 0; j < NLON; j++)
+					{
+						double theta = (double)j/NLON * 2 * PI;
+
+						double *position = positions[(s * NLAT + i) * NLON + j];
+						position[0] = SPH_CENTER_X(sx) + SPH_R * sin(phi) * cos(theta);
+						position[1] = SPH_CENTER_Y(sy) + SPH_R * sin(phi) * sin(theta);
+						position[2] = SPH_CENTER_Z(sz) + SPH_R * cos(phi);
+					}
+				}
+			}
+}
+
+// Expand the potential of electrode e in spherical harmonics within every sphere from its values at the positions of
+// sphere_sample_positions, replacing the expansions of whichever solver was used before
+void expand_electrode_samples
+(
+	struct Trap *trap,
+	const int e,
+	double *samples
+)
+{
+	struct Electrode *electrode = &(*trap->electrodes)[e];
+
+	#pragma omp parallel for collapse(3) schedule(dynamic)
+	for (int sx = 0; sx < NSPH_X; sx++)
+		for (int sy = 0; sy < NSPH_Y; sy++)
+			for (int sz = 0; sz < NSPH_Z; sz++)
+			{
+				int s = (sx * NSPH_Y + sy) * NSPH_Z + sz;
+
+				double grid[NLAT][NLON];
+				for (int i = 0; i < NLAT; i++)
+					for (int j = 0; j < NLON; j++)
+						grid[i][j] = samples[(s * NLAT + i) * NLON + j];
+
+				expand_spherical_harmonics(
+					grid,
+					VLM_SLICE(electrode->Vlm, sx, sy, sz)
+				);
+			}
+}
+
 // Determine the factor which converts the coefficients produced by compute_shcoeffs_real into 4π-normalized
 // coefficients, since the wrapper may call SHExpandDH with either the 4π (norm = 1) or orthonormal (norm = 4) convention
 static double sh_wrapper_normalization

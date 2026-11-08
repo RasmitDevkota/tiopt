@@ -13,6 +13,14 @@ void free_pulse_program
 	struct PulseProgram *pulse_program
 );
 
+double pulse_envelope
+(
+	enum PulseShape shape,
+	const double parameters[2],
+	const double duration,
+	const double t
+);
+
 double lamb_dicke_parameter
 (
 	double k_vector[3],

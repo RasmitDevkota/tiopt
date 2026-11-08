@@ -229,6 +229,8 @@ class PulseProgramStruct(C.Structure):
         ("pulse_n_targets_list", _int_p),
         ("pulse_targets_list", C.POINTER(_int_p)),
         ("pulse_phases", _double_p),
+        ("pulse_shapes", _int_p),
+        ("pulse_shape_parameters", _double_p),
     ]
 
 
@@ -405,6 +407,11 @@ _prototype("tiopt_constant", _c, C.c_char_p)
 _prototype("evaluate_trap_potential_batch", None, _trap_p, _double_p, C.c_int, _double_p, _double_p, _double_p)
 _prototype("evaluate_potential_energy_batch", None, _trap_p, _c, _c, _double_p, C.c_int, _double_p, _double_p)
 _prototype("evaluate_electrode_potential_analytical_batch", None, _electrode_p, _double_p, C.c_int, _double_p, _double_p)
+_prototype("evaluate_potential_energy_derivatives_batch", C.c_int, _trap_p, _c, _c, _double_p, C.c_int, _double_p, _double_p, _double_p, _double_p)
+_prototype("sphere_sample_positions", None, _double_p)
+_prototype("evaluate_panel_potentials", None, C.c_int, _double_p, C.c_int, C.c_int, _int_p, _double_p, _double_p, _double_p, _double_p, _double_p,
+           C.c_int, _double_p, _double_p, _c, C.c_int, _double_p, _double_p)
+_prototype("expand_electrode_samples", None, _trap_p, C.c_int, _double_p)
 _prototype("evaluate_grating_beam_batch", None, _grating_p, C.c_int, _double_p, _double_p)
 _codesign_p = C.c_void_p
 _prototype("get_codesign_n_records", C.c_int, _codesign_p)
@@ -517,6 +524,7 @@ _prototype("fit_waveguide_dispersion", C.c_int, _waveguide_p, _c, _c, C.c_int, C
 # quantum.h
 _prototype("allocate_pulse_program", C.POINTER(PulseProgramStruct), C.c_int, C.c_int)
 _prototype("free_pulse_program", None, C.POINTER(PulseProgramStruct))
+_prototype("pulse_envelope", _c, C.c_int, _double_p, _c, _c)
 _prototype("lamb_dicke_parameter", _c, _double_p, _double_p, _c, _c)
 _prototype("saturation_intensity", _c, _c, _c)
 _prototype("rabi_frequency_from_intensity", _c, _c, _c, _c)
@@ -614,7 +622,7 @@ class TiOptError(RuntimeError):
 class Ion:
     """Trapped ion species, from the presets in ions.c."""
 
-    PRESETS = ("40Ca+", "88Sr+", "171Yb+", "9Be+")
+    PRESETS = ("40Ca+", "43Ca+", "88Sr+", "171Yb+", "9Be+", "25Mg+", "133Ba+", "137Ba+", "138Ba+")
 
     def __init__(self, element="40Ca+"):
         self.struct = IonParameters()
@@ -707,6 +715,24 @@ def parse_layout(layout, n_ions=0):
     _libc.free(C.cast(types, C.c_void_p))
     _libc.free(C.cast(capacities, C.c_void_p))
     return zones
+
+
+def sphere_sample_positions():
+    """Get the positions (µm) at which the potential of an electrode is sampled on every sphere of the spherical harmonic
+    expansions, with shape (NSPH_X * NSPH_Y * NSPH_Z * NLAT * NLON, 3), in the order which Trap.expand_samples expects.
+    """
+    global _SPHERE_SAMPLES
+    if _SPHERE_SAMPLES is None:
+        n_lat = 2 * (int(constant("LMAX")) + 1)
+        n = int(constant("NSPH_X") * constant("NSPH_Y") * constant("NSPH_Z")) * n_lat * n_lat
+        positions = np.zeros((n, 3))
+        _lib.sphere_sample_positions(_ptr(positions))
+        _SPHERE_SAMPLES = positions
+        _SPHERE_SAMPLES.setflags(write=False)
+    return _SPHERE_SAMPLES
+
+
+_SPHERE_SAMPLES = None
 
 
 def expansion_region():
@@ -1013,6 +1039,26 @@ class Trap:
         if _lib.add_trap_photonics(C.byref(self.struct), _ptr(_array(gate_position)), _ptr(_array(measure_position))) != 0:
             raise TiOptError("failed to design the trap's grating couplers")
 
+    def set_photonics(self, gratings, detectors=()):
+        """Replace the grating couplers and detectors of the trap with copies of the given ones.
+
+        Args:
+            gratings: Grating objects.
+            detectors: Detector objects.
+        """
+        if self.struct.n_grating_couplers > 0 and self.struct.grating_couplers:
+            _libc.free(C.cast(self.struct.grating_couplers, C.c_void_p))
+        if self.struct.n_detectors > 0 and self.struct.detectors:
+            _libc.free(C.cast(self.struct.detectors, C.c_void_p))
+        self.struct.n_grating_couplers = 0
+        self.struct.n_detectors = 0
+        _lib.allocate_grating_couplers(C.byref(self.struct), len(gratings))
+        _lib.allocate_detectors(C.byref(self.struct), len(detectors))
+        for g, grating in enumerate(gratings):
+            self.struct.grating_couplers[g] = grating.struct
+        for d, detector in enumerate(detectors):
+            self.struct.detectors[d] = detector.struct
+
     # Zones ----------------------------------------------------------------------------------------------------------
 
     def zones(self):
@@ -1293,6 +1339,45 @@ class Trap:
         )
         return phi.reshape(shape)
 
+    def energy_derivatives_batch(self, ion, positions, voltages=None, hessian=False):
+        """Evaluate the potential energy (J) of an ion, its gradient (J/µm), and optionally its Hessian (J/µm^2) at many
+        positions at once (e.g. at every ion of a crystal).
+
+        Args:
+            ion: Ion species.
+            positions: Positions (µm) with shape (..., 3).
+            voltages: Voltage of each electrode (V), where None means 0 V on every electrode.
+            hessian: Specifies whether to also return the Hessian.
+
+        Returns:
+            Potential energy (J) with shape (...), its gradient (J/µm) with shape (..., 3), its Hessian (J/µm^2) with
+            shape (..., 3, 3) if it is requested, and the number of positions outside of the spherical harmonic
+            expansions
+        """
+        self._require_solved()
+        positions = _array(positions)
+        shape = positions.shape[:-1]
+        flat = _array(positions.reshape(-1, 3))
+        U = np.zeros(len(flat))
+        grad = np.zeros((len(flat), 3))
+        H = np.zeros((len(flat), 3, 3)) if hessian else None
+        n_outside = _lib.evaluate_potential_energy_derivatives_batch(
+            C.byref(self.struct), ion.mass, ion.charge, _ptr(self._voltages(voltages)), len(flat), _ptr(flat), _ptr(U), _ptr(grad),
+            _ptr(H) if hessian else None
+        )
+        if hessian:
+            return U.reshape(shape), grad.reshape(shape + (3,)), H.reshape(shape + (3, 3)), n_outside
+        return U.reshape(shape), grad.reshape(shape + (3,)), n_outside
+
+    def expand_samples(self, e, samples):
+        """Replace the spherical harmonic expansions of electrode e with expansions of its potential (V/V) at the
+        positions of sphere_sample_positions, e.g. from the boundary element method of tiopt.bem.
+        """
+        samples = _array(samples).reshape(-1)
+        if len(samples) != len(sphere_sample_positions()):
+            raise ValueError(f"expected {len(sphere_sample_positions())} samples, got {len(samples)}")
+        _lib.expand_electrode_samples(C.byref(self.struct), int(e), _ptr(samples))
+
     def evaluate(self, position, voltages=None):
         """Evaluate the potential (V), its gradient (V/µm), and its Hessian (V/µm^2) at one position."""
         self._require_solved()
@@ -1472,6 +1557,64 @@ class Waveform:
         pointer = _lib.transport_program_to_waveform(C.byref(trap.struct), C.byref(ion.struct), program._pointer, steps, omega_axial)
         flush_c_output()
         return cls(pointer)
+
+    @classmethod
+    def from_wells(cls, trap, ion, times, well_positions, omega_axial=AXIAL_FREQUENCY, roughness_weight=None):
+        """Solve for the voltages which hold wells at given positions at given times, e.g. to move several ions at once.
+
+        Args:
+            trap: Trap whose electrodynamics have been solved.
+            ion: Ion species.
+            times: Time of each step (s).
+            well_positions: Position of every well at every step (µm) with shape (n_steps, n_wells, 3).
+            omega_axial: Axial secular frequency of every well (rad/s).
+            roughness_weight: Weight on the roughness of the voltages between steps (WAVEFORM_ROUGHNESS_WEIGHT by
+                default).
+
+        Returns:
+            New waveform
+        """
+        trap._require_solved()
+        times = _array(times).reshape(-1)
+        wells = _array(well_positions).reshape(len(times), -1, 3)
+        n_steps, n_wells = wells.shape[:2]
+        if roughness_weight is None:
+            roughness_weight = constant("WAVEFORM_ROUGHNESS_WEIGHT")
+        waveform = cls.empty(n_steps, trap.n_electrodes, n_wells)
+        struct = waveform.struct
+        C.memmove(struct.times, _ptr(times), times.nbytes)
+        C.memmove(C.cast(struct.well_positions, _double_p), _ptr(_array(wells.reshape(-1))), wells.nbytes)
+        voltages = np.zeros(n_steps * trap.n_electrodes)
+        status = _lib.solve_waveform(C.byref(trap.struct), ion.mass, ion.charge, n_steps, n_wells, C.cast(struct.well_positions, _double_p), omega_axial, roughness_weight, _ptr(voltages))
+        flush_c_output()
+        if status != 0:
+            waveform.close()
+            raise TiOptError("failed to solve for the voltages of the wells")
+        C.memmove(struct.voltages, _ptr(voltages), voltages.nbytes)
+        return waveform
+
+    @classmethod
+    def from_voltages(cls, times, voltages, well_positions=None):
+        """Make a waveform from the voltages of every electrode at every step, e.g. from tiopt.voltages or after the
+        hardware model of tiopt.hardware.
+
+        Args:
+            times: Time of each step (s).
+            voltages: Voltage of every electrode at every step (V) with shape (n_steps, n_electrodes).
+            well_positions: Position of every well at every step (µm) with shape (n_steps, n_wells, 3), if known.
+
+        Returns:
+            New waveform
+        """
+        times = _array(times).reshape(-1)
+        voltages = _array(voltages).reshape(len(times), -1)
+        wells = np.zeros((len(times), 1, 3)) if well_positions is None else _array(well_positions).reshape(len(times), -1, 3)
+        waveform = cls.empty(len(times), voltages.shape[1], wells.shape[1])
+        struct = waveform.struct
+        C.memmove(struct.times, _ptr(times), times.nbytes)
+        C.memmove(struct.voltages, _ptr(_array(voltages.reshape(-1))), voltages.nbytes)
+        C.memmove(C.cast(struct.well_positions, _double_p), _ptr(_array(wells.reshape(-1))), wells.nbytes)
+        return waveform
 
     def close(self):
         """Free the memory of the waveform."""
@@ -1951,12 +2094,18 @@ def fit_gaussian(x, y):
 # ---------------------------------------------------------------------------------------------------------------------
 
 
+# Shapes of the envelopes of pulses (enum PulseShape)
+PULSE_SHAPES = ("square", "trapezoid", "gaussian", "cosine", "blackman")
+
+
 @dataclass
 class Pulse:
     """Laser pulse on the S-D transition.
 
-    The pulse has a start time (s), duration (s), detuning from the transition (rad/s), Rabi frequency (rad/s), phase
-    (rad), target ions (starting at 1), and the Lamb-Dicke parameter of each target.
+    The pulse has a start time (s), duration (s), detuning from the transition (rad/s), peak Rabi frequency (rad/s),
+    phase (rad), target ions (starting at 1), the Lamb-Dicke parameter of each target, and the shape of its envelope
+    (see PULSE_SHAPES) with up to two parameters (s): the rise and fall times of trapezoidal and cosine pulses (which
+    make a triangle or a sine squared pulse if they add up to the duration), or the width of a Gaussian pulse.
     """
 
     start: float
@@ -1966,6 +2115,35 @@ class Pulse:
     phase: float = 0.0
     targets: list = field(default_factory=lambda: [1])
     lamb_dicke: float = 0.1
+    shape: str = "square"
+    shape_parameters: tuple = (0.0, 0.0)
+
+    def envelope(self, t):
+        """Envelope of the pulse (which peaks at 1) at times t (s) since the start of the program."""
+        return pulse_envelope(self.shape, self.shape_parameters, self.duration, np.asarray(t, dtype=float) - self.start)
+
+    @property
+    def area(self):
+        """Pulse area (rad), i.e. the rotation the pulse makes on resonance."""
+        t = np.linspace(0.0, self.duration, 2001)
+        return self.rabi_frequency * np.trapezoid(pulse_envelope(self.shape, self.shape_parameters, self.duration, t), t)
+
+
+def _pulse_shape(shape):
+    if shape not in PULSE_SHAPES:
+        raise ValueError(f"unknown pulse shape {shape!r}; choose from {', '.join(PULSE_SHAPES)}")
+    return PULSE_SHAPES.index(shape)
+
+
+def pulse_envelope(shape, parameters, duration, t):
+    """Envelope (which peaks at 1) of a pulse of a shape in PULSE_SHAPES with its parameters (s) and duration (s), at
+    times t (s) since it starts.
+    """
+    code = _pulse_shape(shape)
+    values = (C.c_double * 2)(*[float(v) for v in tuple(parameters)[:2]] + [0.0] * (2 - len(tuple(parameters)[:2])))
+    t = np.asarray(t, dtype=float)
+    out = np.array([_lib.pulse_envelope(code, C.cast(values, _double_p), float(duration), float(time)) for time in t.ravel()])
+    return out.reshape(t.shape)
 
 
 @dataclass
@@ -2011,6 +2189,10 @@ def simulate_pulses(ion, pulses, n_ions=1, mode_frequency=AXIAL_FREQUENCY, n_max
             p_struct.pulse_times[p] = pulse.start
             p_struct.pulse_durations[p] = pulse.duration
             p_struct.pulse_phases[p] = pulse.phase
+            p_struct.pulse_shapes[p] = _pulse_shape(pulse.shape)
+            parameters = tuple(pulse.shape_parameters) + (0.0, 0.0)
+            p_struct.pulse_shape_parameters[2 * p] = float(parameters[0])
+            p_struct.pulse_shape_parameters[2 * p + 1] = float(parameters[1])
             # The targets are freed by free_pulse_program, so they must be allocated by C
             targets = C.cast(_libc.malloc(C.sizeof(C.c_int) * max(len(pulse.targets), 1)), _int_p)
             for t, target in enumerate(pulse.targets):

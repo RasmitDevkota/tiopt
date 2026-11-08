@@ -55,6 +55,59 @@ int generate_ion_from_preset
 		ion->gamma_SP = 1.0 / 8.2E-9;
 		ion->gamma_SD = 0.0;
 	}
+	else if (strcmp(element, "43Ca+") == 0)
+	{
+		// 43Ca+ has the same transitions as 40Ca+ (up to isotope shifts of a few GHz), with the S-D optical qubit
+		ion->element = "43Ca+";
+		ion->atomic_mass = 42.958766;
+		ion->charge = 1.0;
+		ion->omega_SP = 2 * PI * C_LIGHT / 396.959E-9;
+		ion->omega_SD = 2 * PI * C_LIGHT / 729.347E-9;
+		ion->gamma_SP = 1.0 / 7.098E-9;
+		ion->gamma_SD = 1.0 / 1.168;
+	}
+	else if (strcmp(element, "25Mg+") == 0)
+	{
+		// 25Mg+ has no metastable D states, so its 1.789 GHz hyperfine qubit takes the place of the S-D transition
+		ion->element = "25Mg+";
+		ion->atomic_mass = 24.985837;
+		ion->charge = 1.0;
+		ion->omega_SP = 2 * PI * C_LIGHT / 279.635E-9;
+		ion->omega_SD = 2 * PI * 1.7887E9;
+		ion->gamma_SP = 1.0 / 3.81E-9;
+		ion->gamma_SD = 0.0;
+	}
+	else if (strcmp(element, "133Ba+") == 0)
+	{
+		// 133Ba+ is used for its 9.925 GHz hyperfine qubit, which takes the place of the S-D transition
+		ion->element = "133Ba+";
+		ion->atomic_mass = 132.906007;
+		ion->charge = 1.0;
+		ion->omega_SP = 2 * PI * C_LIGHT / 493.545E-9;
+		ion->omega_SD = 2 * PI * 9.925453E9;
+		ion->gamma_SP = 1.0 / 7.855E-9;
+		ion->gamma_SD = 0.0;
+	}
+	else if (strcmp(element, "137Ba+") == 0)
+	{
+		ion->element = "137Ba+";
+		ion->atomic_mass = 136.905827;
+		ion->charge = 1.0;
+		ion->omega_SP = 2 * PI * C_LIGHT / 493.545E-9;
+		ion->omega_SD = 2 * PI * C_LIGHT / 1762.165E-9;
+		ion->gamma_SP = 1.0 / 7.855E-9;
+		ion->gamma_SD = 1.0 / 30.14;
+	}
+	else if (strcmp(element, "138Ba+") == 0)
+	{
+		ion->element = "138Ba+";
+		ion->atomic_mass = 137.905247;
+		ion->charge = 1.0;
+		ion->omega_SP = 2 * PI * C_LIGHT / 493.545E-9;
+		ion->omega_SD = 2 * PI * C_LIGHT / 1762.165E-9;
+		ion->gamma_SP = 1.0 / 7.855E-9;
+		ion->gamma_SD = 1.0 / 30.14;
+	}
 	else
 	{
 		printf("ERROR: Unknown ion species '%s'\n", element);

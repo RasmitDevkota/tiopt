@@ -247,6 +247,17 @@ static const struct SpeciesBeams species_beams[] =
 	// 313 nm Raman beams for the hyperfine qubit, 313 nm detection on the S1/2-P3/2 transition and repump on the
 	// S1/2-P1/2 transition, and photoionization by two photons of 235 nm (from the same beam)
 	{ "9Be+", { 0.313, 0.313132, 0.313197, 0.0, 0.234933, 0.0 } },
+	// 43Ca+ uses the same light as 40Ca+
+	{ "43Ca+", { 0.729347, 0.396959, 0.866452, 0.854444, 0.422792, 0.375 } },
+	// 280 nm Raman beams for the hyperfine qubit, 279.6 nm detection on the S1/2-P3/2 transition and 280.4 nm repump on
+	// the S1/2-P1/2 transition, and photoionization by two photons of 285 nm (from the same beam)
+	{ "25Mg+", { 0.280, 0.279635, 0.280353, 0.0, 0.285296, 0.0 } },
+	// 532 nm Raman beams for the hyperfine qubit, 494 nm detection, 650 nm repump, 614 nm quench of the D5/2 state, and
+	// 554 nm and 405 nm photoionization
+	{ "133Ba+", { 0.532, 0.493545, 0.649869, 0.614342, 0.553702, 0.405 } },
+	// 1762 nm S1/2-D5/2 qubit, and otherwise the same light as 133Ba+
+	{ "137Ba+", { 1.762165, 0.493545, 0.649869, 0.614342, 0.553702, 0.405 } },
+	{ "138Ba+", { 1.762165, 0.493545, 0.649869, 0.614342, 0.553702, 0.405 } },
 };
 
 // Light which the integrated photonics deliver for a beam of enum PhotonicsBeam and a species: its vacuum wavelength,
