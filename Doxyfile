@@ -969,7 +969,8 @@ WARN_LOGFILE           =
 # spaces. See also FILE_PATTERNS and EXTENSION_MAPPING
 # Note: If this tag is empty the current directory is searched.
 
-INPUT                  = src \
+INPUT                  = README.md \
+                         src \
                          include \
                          python/tiopt/lib.py \
                          python/tiopt/export.py \
