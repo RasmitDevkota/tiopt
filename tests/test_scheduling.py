@@ -40,12 +40,18 @@ def test_transport_schedule(circuit):
     # Gates happen in the gate zone and the measurement in the measure zone
     np.testing.assert_allclose(program.destinations[:10, 0], 50.0)
     assert program.destinations[10, 0] == 150.0
-    # Each layer arrives together, after the previous layer
-    layers = [i.layer for i in circuit.instructions]
+    # Each layer arrives in rounds of operations which fit in the gate zone (2 ions) at once, each after the previous
+    # round, so the 4 single-qubit gates take 2 rounds and every layer of two-qubit gates takes 2 rounds
+    layers = np.array([i.layer for i in circuit.instructions])
+    n_targets = np.array([len(i.targets) for i in circuit.instructions])
     times = program.arrival_times
-    for layer in range(1, 6):
-        assert np.ptp(times[np.array(layers) == layer]) == 0.0
-    assert np.all(np.diff([times[layers.index(layer)] for layer in range(1, 6)]) > 0)
+    rounds = np.unique(times, return_inverse=True)[1]
+    assert rounds.max() + 1 == 9
+    for r in range(rounds.max() + 1):
+        assert len(np.unique(layers[rounds == r])) == 1
+        if layers[rounds == r][0] < 5:
+            assert n_targets[rounds == r].sum() <= 2
+    assert np.all(np.diff(times) >= 0)
     assert times[0] == pytest.approx(200.0 / tiopt.TRANSPORT_SPEED_LIMIT)
 
 
