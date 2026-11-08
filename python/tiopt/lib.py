@@ -22,10 +22,10 @@ import numpy as np
 
 
 def library_path():
-    """Find libtiopt.so, which is at $TIOPT_LIBRARY if it is set and in the root of the repository otherwise."""
+    """Find libtiopt.so, which is at $TIOPT_LIBRARY if it is set and in the build directory of the repository otherwise."""
     if os.environ.get("TIOPT_LIBRARY"):
         return Path(os.environ["TIOPT_LIBRARY"])
-    return Path(__file__).resolve().parents[2] / "libtiopt.so"
+    return Path(__file__).resolve().parents[2] / "build" / "libtiopt.so"
 
 
 def _load_library():
@@ -258,7 +258,7 @@ class MotionalModeStruct(C.Structure):
 
 
 class SpectrumOptions(C.Structure):
-    """Mirror of the spectrum options in ion_heating/ion_heating.h."""
+    """Mirror of the spectrum options in ion_heating.h."""
     _fields_ = [
         ("dt", C.c_double),
         ("n", C.c_int),
@@ -551,7 +551,7 @@ _prototype("set_trap_zone", None, _trap_p, C.c_int, C.c_int, C.c_int, _double_p)
 _prototype("set_layout_zones", C.c_int, _trap_p, C.c_char_p, C.c_int, _c)
 _prototype("generate_trap_graph_from_zones", None, _trap_p, C.POINTER(TrapGraphStruct))
 
-# ion_heating/ion_heating.h
+# ion_heating.h
 _prototype("ion_spectrum_opts_default", None, C.POINTER(SpectrumOptions))
 _prototype("ion_compute_psd", C.c_int, _double_p, C.POINTER(SpectrumOptions), C.POINTER(_double_p), C.POINTER(_double_p))
 

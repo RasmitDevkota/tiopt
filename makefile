@@ -35,25 +35,30 @@ CXX = g++
 # spherical harmonics expansions (run make clean first so that everything is rebuilt)
 DEFINES ?=
 
-CFLAGS = -O3 -Wall -fPIC -g -fno-math-errno -fcx-limited-range $(OPENMP_FLAGS) $(DEFINES)
+CFLAGS = -O3 -Wall -fPIC -g -fno-math-errno -fcx-limited-range $(OPENMP_FLAGS) $(DEFINES) -I$(INC_DIR) -I$(BUILD_DIR)
 CXXFLAGS = -O3 -Wall -fPIC -g $(OPENMP_FLAGS) $(DEFINES)
+
+# Directories for sources, headers, and build outputs
+SRC_DIR = src
+INC_DIR = include
+BUILD_DIR = build
 
 # Source files (C)
 LIB_SRC = ti_utils.c experiments.c verlet.c electrodynamics.c io.c transport.c waveforms.c analysis.c traps.c ions.c photonics.c quantum.c circuits.c codesign.c zones.c acceleration.c bindings.c ion_heating/ion_heating.c
 C_SRC = $(LIB_SRC) main.c
 
 # Header files (C)
-C_HDR = $(wildcard *.h) ion_heating/ion_heating.h
+C_HDR = $(wildcard $(INC_DIR)/*.h)
 
 # Object files
-LIB_OBJ = $(LIB_SRC:.c=.o)
-C_OBJ = $(LIB_OBJ) main.o
+LIB_OBJ = $(addprefix $(BUILD_DIR)/, $(LIB_SRC:.c=.o))
+C_OBJ = $(LIB_OBJ) $(BUILD_DIR)/main.o
 
 # Output binary
-OUTPUT = tiopt
+OUTPUT = $(BUILD_DIR)/tiopt
 
 # Output shared library, used by the Python bindings, GUI and tests
-LIBRARY = libtiopt.so
+LIBRARY = $(BUILD_DIR)/libtiopt.so
 
 # Make target: all
 all: $(OUTPUT) $(LIBRARY)
@@ -67,16 +72,18 @@ $(LIBRARY): $(LIB_OBJ)
 	$(CC) -shared $(LIB_OBJ) $(LIBS) -o $(LIBRARY)
 
 # Compile C code
-%.o: %.c $(C_HDR)
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(C_HDR)
+	@mkdir -p $(dir $@)
 	$(CC) -c $< $(CFLAGS) -o $@
 
 # Embed the OpenCL kernels in the library as a string
-kernels_cl.h: kernels.cl
-	echo "static const char kernels_cl[] = {" > kernels_cl.h
-	od -An -v -tx1 kernels.cl | sed 's/\([0-9a-f][0-9a-f]\)/0x\1,/g' >> kernels_cl.h
-	echo "0x00 };" >> kernels_cl.h
+$(BUILD_DIR)/kernels_cl.h: $(SRC_DIR)/kernels.cl
+	@mkdir -p $(BUILD_DIR)
+	echo "static const char kernels_cl[] = {" > $@
+	od -An -v -tx1 $< | sed 's/\([0-9a-f][0-9a-f]\)/0x\1,/g' >> $@
+	echo "0x00 };" >> $@
 
-acceleration.o: kernels_cl.h
+$(BUILD_DIR)/acceleration.o: $(BUILD_DIR)/kernels_cl.h
 
 # Run the C and Python test suites
 test: $(LIBRARY)
@@ -93,12 +100,12 @@ gui: $(LIBRARY)
 
 # Clean up build files
 clean:
-	rm -f $(C_OBJ) $(OUTPUT) $(LIBRARY) kernels_cl.h
+	rm -rf $(BUILD_DIR)
 	$(MAKE) -C tests clean
 
 # Deep clean build files and outputs
 deep-clean:
-	rm -f $(C_OBJ) $(OUTPUT) $(LIBRARY) kernels_cl.h
+	rm -rf $(BUILD_DIR)
 	$(MAKE) -C tests clean
 	rm meshes/*
 
