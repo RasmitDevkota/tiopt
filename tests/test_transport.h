@@ -24,3 +24,13 @@ int test_generate_transport_schedule
 (
 	double atol
 );
+
+int test_parse_qasm_rejects_unknown_gates
+(
+	double atol
+);
+
+int test_schedule_rounds_fit_zones
+(
+	double atol
+);

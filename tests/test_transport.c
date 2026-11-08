@@ -24,6 +24,8 @@ int test_all_transport
 	result += test_parse_qasm(atol);
 	result += test_compute_circuit_layers(atol);
 	result += test_generate_transport_schedule(atol);
+	result += test_parse_qasm_rejects_unknown_gates(atol);
+	result += test_schedule_rounds_fit_zones(atol);
 
 	return result;
 }
@@ -152,10 +154,12 @@ int test_generate_transport_schedule
 	struct CircuitGraph *circuit_graph = parse_qasm("quantumcircuits/test_0000.qasm");
 
 	struct TransportProgram *transport_program = malloc(sizeof(struct TransportProgram));
-	transport_program = generate_transport_schedule(&trap_graph, circuit_graph, transport_program);
+	struct ScheduleTrace trace = { 0 };
+	transport_program = generate_transport_schedule_strategy(&trap_graph, circuit_graph, transport_program, DEFAULT_SCHEDULE_STRATEGY, &trace);
 
 	if (transport_program == NULL)
 	{
+		free_schedule_trace(&trace);
 		free_circuit_graph(circuit_graph);
 		free_trap_graph(&trap_graph);
 		return check_error("generate_transport_schedule succeeds", HUGE_VAL, 0);
@@ -175,23 +179,130 @@ int test_generate_transport_schedule
 		n_wrong += (fabs(transport_program->destinations[t][2] - ION_HEIGHT) > atol);
 	}
 
-	// Transports in the same layer arrive together, and later layers arrive later
+	// The gate zone only holds two ions, so each layer runs in rounds which fit in it: the four single-qubit gates of
+	// the first layer in two rounds, each pair of two-qubit gates in two more, and the measurement of every qubit in one
+	int expected_rounds[11] = { 1, 1, 2, 2, 3, 4, 5, 6, 7, 8, 9 };
+	n_wrong += (trace.n_rounds != 9);
+	for (int t = 0; t < MIN(transport_program->n_transports, 11); t++)
+		n_wrong += (trace.transport_rounds[t] != expected_rounds[t]);
+
+	// Transports in the same round arrive together, and later rounds arrive later
 	for (int t = 1; t < MIN(transport_program->n_transports, 11); t++)
 	{
-		int same_layer = circuit_graph->layer_idxs[t] == circuit_graph->layer_idxs[t-1];
+		int same_round = trace.transport_rounds[t] == trace.transport_rounds[t-1];
 
-		if (same_layer)
+		if (same_round)
 			n_wrong += (fabs(transport_program->arrival_times[t] - transport_program->arrival_times[t-1]) > atol);
 		else
 			n_wrong += (transport_program->arrival_times[t] <= transport_program->arrival_times[t-1]);
 	}
 
-	// The first layer starts after the 200 µm transport from the load zone to the gate zone
+	// The first round starts after the 200 µm transport from the load zone to the gate zone
 	n_wrong += (fabs(transport_program->arrival_times[0] - 200.0 / TRANSPORT_SPEED_LIMIT) > atol);
 
+	free_schedule_trace(&trace);
 	free_transport_program(transport_program);
 	free_circuit_graph(circuit_graph);
 	free_trap_graph(&trap_graph);
 
 	return check_error("generate_transport_schedule fills transport program", n_wrong, 0);
+}
+
+int test_parse_qasm_rejects_unknown_gates
+(
+	double atol
+)
+{
+	// A gate which the parser does not know would be left out of the schedule, so the circuit is rejected instead
+	char *filename = "unknown_gate_test.qasm";
+	FILE *fp = fopen(filename, "w");
+	fprintf(fp, "// Comments, headers and declarations are skipped\nOPENQASM 3;\nqubit[2] qreg;\nbit[2] creg;\nh qreg[0];\nrz(0.5) qreg[0];\ncx qreg[0], qreg[1];\nmeasure qreg -> creg;\n");
+	fclose(fp);
+
+	struct CircuitGraph *circuit_graph = parse_qasm(filename);
+	remove(filename);
+
+	int n_wrong = (circuit_graph != NULL);
+	if (circuit_graph != NULL)
+		free_circuit_graph(circuit_graph);
+
+	return check_error("parse_qasm rejects circuits with unknown gates", n_wrong, 0);
+}
+
+int test_schedule_rounds_fit_zones
+(
+	double atol
+)
+{
+	// The first layer has four single-qubit gates but the gate zone only holds two ions, so it runs in two rounds, with
+	// every operation finding its ions in a zone of its type and no zone over capacity
+	enum ZoneType zone_types[7] = { LOAD_ZONE, EMPTY_ZONE, STORAGE_ZONE, EMPTY_ZONE, GATE_ZONE, EMPTY_ZONE, MEASURE_ZONE };
+	int zone_capacities[7] = { 5, 3, 10, 3, 2, 3, 4 };
+
+	struct CircuitGraph *circuit_graph = parse_qasm("quantumcircuits/test_0000.qasm");
+
+	enum ScheduleStrategy strategies[2] = { SCHEDULE_ROUNDS, DEFAULT_SCHEDULE_STRATEGY };
+	int n_wrong = 0;
+
+	for (int s = 0; s < 2; s++)
+	{
+		struct TrapGraph trap_graph;
+		generate_linear_trap_graph(7, zone_types, zone_capacities, -150.0, 150.0, ION_HEIGHT, &trap_graph);
+
+		struct TransportProgram *program = calloc(1, sizeof(struct TransportProgram));
+		struct ScheduleTrace trace = { 0 };
+
+		if (generate_transport_schedule_strategy(&trap_graph, circuit_graph, program, strategies[s], &trace) == NULL)
+		{
+			n_wrong++;
+		}
+		else
+		{
+			n_wrong += (trace.transport_rounds[0] != 1) + (trace.transport_rounds[3] != 2);
+
+			// Follow the ions, checking each round once all of its transports are done
+			int n_ions = circuit_graph->n_ions;
+			int *ion_zones = calloc(n_ions, sizeof(int));
+			int *occupancy = calloc(trap_graph.n_zones, sizeof(int));
+			occupancy[0] = n_ions;
+
+			for (int m = 0; m < trace.n_moves; m++)
+			{
+				struct IonMove *move = &trace.moves[m];
+				ion_zones[move->ion - 1] = move->to_zone;
+				occupancy[move->from_zone]--;
+				occupancy[move->to_zone]++;
+
+				int last = (move->transport >= 0) && (m + 1 == trace.n_moves || trace.moves[m + 1].transport < 0 ||
+					trace.transport_rounds[trace.moves[m + 1].transport] != trace.transport_rounds[move->transport]);
+				if (!last)
+					continue;
+
+				int round = trace.transport_rounds[move->transport];
+				for (int t = 0; t < program->n_transports; t++)
+				{
+					if (trace.transport_rounds[t] != round)
+						continue;
+
+					struct InstructionNode *node = &circuit_graph->instruction_nodes[t];
+					for (int i = 0; i < node->n_target_ions; i++)
+						n_wrong += (fabs(trap_graph.zone_nodes[ion_zones[node->target_ions[i] - 1]].position[0] - program->destinations[t][0]) > atol);
+				}
+
+				for (int z = 0; z < trap_graph.n_zones; z++)
+					n_wrong += (occupancy[z] > trap_graph.zone_nodes[z].zone_capacity);
+			}
+
+			free(occupancy);
+			free(ion_zones);
+		}
+
+		free_schedule_trace(&trace);
+		free_transport_program(program);
+		free_trap_graph(&trap_graph);
+	}
+
+	free_circuit_graph(circuit_graph);
+
+	return check_error("schedules split layers into rounds which fit in the zones", n_wrong, 0);
 }

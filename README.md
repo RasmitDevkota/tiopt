@@ -355,7 +355,7 @@ The sources are in `src` and their headers in `include`.
 - `acceleration.c` and `kernels.cl` - threads and the OpenCL backend (which is loaded at runtime) with its kernels
 - `bindings.c` - helpers for the Python bindings
 
-Note that the transport programs from `generate_transport_schedule` record each transport into the zone of an operation, but not the transports of the ions back into storage after each layer (which the co-design flow adds to the next transport of each ion).
+`generate_transport_schedule` splits each layer of a circuit into rounds of operations which fit in the zones at once, which run one after another (`SCHEDULE_BASELINE` in `generate_transport_schedule_strategy` runs every layer at once instead, which only gives a valid schedule if every layer fits). Note that the transport programs record each transport into the zone of an operation, but not the transports of the ions back into storage after each round; `generate_transport_schedule_strategy` records them in a `ScheduleTrace`, along with the round of each transport, and the co-design flow adds them to the next transport of each ion. Circuits with gates which the parser does not know are rejected, and the scheduler prints the occupancy of the zones as it goes only if `TIOPT_SCHEDULE_VERBOSE` is set.
 
 # Circuits, pulses, and transport
 
