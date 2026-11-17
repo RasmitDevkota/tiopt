@@ -10,6 +10,7 @@
 #include "photonics.h"
 #include "acceleration.h"
 #include "codesign.h"
+#include "transport.h"
 
 // Size of a data structure, so that bindings to other languages can check their definitions; returns -1 for unknown names
 int tiopt_struct_size
@@ -108,6 +109,8 @@ double tiopt_constant
 		return GATE_DURATION;
 	if (strcmp(name, "DETECTION_DURATION") == 0)
 		return DETECTION_DURATION;
+	if (strcmp(name, "DEFAULT_LOOKAHEAD_LAYERS") == 0)
+		return DEFAULT_LOOKAHEAD_LAYERS;
 
 	return NAN;
 }

@@ -1,6 +1,7 @@
 #include "test_waveforms.h"
 
 #include <stdlib.h>
+#include <string.h>
 #include <stdio.h>
 #include <math.h>
 
@@ -8,6 +9,7 @@
 #include "data_structures.h"
 #include "electrodynamics.h"
 #include "waveforms.h"
+#include "transport.h"
 #include "traps.h"
 #include "ions.h"
 #include "test_utils.h"
@@ -26,6 +28,7 @@ int test_all_waveforms
 	result += test_waveform_utilities(atol);
 	result += test_optimize_primitive(atol);
 	result += test_transport_program_to_waveform(atol);
+	result += test_schedule_trace_to_waveform(atol);
 	result += test_compute_secular_frequencies(atol);
 	result += test_compute_U_pond(atol);
 
@@ -323,6 +326,93 @@ int test_transport_program_to_waveform
 	double max_frequency_error;
 	evaluate_waveform_errors(&trap, &ion, waveform, AXIAL_FREQUENCY, &max_force, &max_frequency_error);
 	result += check_error("transport_program_to_waveform wells have target frequency", max_frequency_error, 1E-4);
+
+	free_transport_waveform(waveform);
+	free_trap(&trap);
+
+	return result;
+}
+
+int test_schedule_trace_to_waveform
+(
+	double atol
+)
+{
+	struct Trap trap;
+	struct IonParameters ion;
+	make_test_trap(&trap, &ion);
+
+	// Three zones along the axis, far enough apart (two electrodes) for separate wells, with ion 1 in the first and ion 2
+	// in the last
+	struct ZoneNode zones[3] = { { 0 } };
+	double xs[3] = { -100.0, 0.0, 100.0 };
+	for (int z = 0; z < 3; z++)
+	{
+		zones[z].position[0] = xs[z];
+		zones[z].position[2] = ION_HEIGHT;
+		find_rf_null(&trap, &zones[z].position, 100);
+	}
+
+	struct TrapGraph trap_graph = { 3, 0, zones, NULL };
+
+	double initial_positions[2][3];
+	memcpy(initial_positions[0], zones[0].position, sizeof(double[3]));
+	memcpy(initial_positions[1], zones[2].position, sizeof(double[3]));
+
+	struct TransportProgram transport_program = { 0 };
+	transport_program.n_ions = 2;
+	transport_program.initial_positions = initial_positions;
+
+	// Ion 1 moves to the middle zone and back (into storage), and ion 2 moves to the middle zone while ion 1 is leaving
+	// it, so that the last two moves overlap
+	struct IonMove moves[3] = {
+		{ 1, 0, 1, 0, 0.0, 30E-6 },
+		{ 1, 1, 0, -1, 40E-6, 70E-6 },
+		{ 2, 2, 1, 1, 50E-6, 80E-6 },
+	};
+	struct ScheduleTrace trace = { 3, 3, moves, 0, NULL };
+
+	struct TransportWaveform *waveform = schedule_trace_to_waveform(&trap, &ion, &trap_graph, &transport_program, &trace, 31, AXIAL_FREQUENCY);
+	if (waveform == NULL)
+	{
+		free_trap(&trap);
+		return check_error("schedule_trace_to_waveform follows the moves", HUGE_VAL, 0);
+	}
+
+	// 31 steps over each of the first two moves, and 10 more for the last one, which shares the times of the second from
+	// 50 µs to 70 µs
+	double error = abs(waveform->n_waveform_steps - 72) + abs(waveform->n_wells - 2);
+
+	for (int s = 1; s < waveform->n_waveform_steps; s++)
+		if (waveform->times[s] <= waveform->times[s-1])
+			error += 1.0;
+
+	// Every move reaches its destination when it arrives, and the other ion is where it should be
+	for (int s = 0; s < waveform->n_waveform_steps; s++)
+	{
+		double t = waveform->times[s];
+		double (*wells)[3] = &waveform->well_positions[2 * s];
+
+		for (int m = 0; m < 3; m++)
+			if (fabs(t - moves[m].arrive) < 1E-12)
+				for (int k = 0; k < 3; k++)
+					error += fabs(wells[moves[m].ion - 1][k] - zones[moves[m].to_zone].position[k]);
+
+		// Ion 2 waits in its zone until 50 µs, and both ions move at once from 50 µs to 70 µs
+		if (t <= 50E-6 + 1E-12)
+			error += fabs(wells[1][0] - zones[2].position[0]);
+		if (t > 50E-6 + 1E-9 && t < 70E-6 - 1E-9)
+			error += (fabs(wells[0][0] - zones[0].position[0]) < 1E-9) + (fabs(wells[1][0] - zones[2].position[0]) < 1E-9);
+	}
+
+	int result = check_error("schedule_trace_to_waveform follows the moves", error, atol);
+
+	double max_force;
+	double max_frequency_error;
+	evaluate_waveform_errors(&trap, &ion, waveform, AXIAL_FREQUENCY, &max_force, &max_frequency_error);
+	// Two wells 100 µm apart in this seven-electrode trap only reach the target frequency to about 6E-3, with these moves
+	// one after another (as transport_program_to_waveform finds too) or overlapping
+	result += check_error("schedule_trace_to_waveform wells have target frequency", max_frequency_error, 1E-2);
 
 	free_transport_waveform(waveform);
 	free_trap(&trap);

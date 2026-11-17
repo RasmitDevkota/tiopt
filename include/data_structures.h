@@ -167,6 +167,7 @@ struct InstructionNode
 	int graphindex; // used to determine position in node array for writing to layer_idxs (starts at 1)
 	int n_prev_nodes;
 	struct InstructionNode *prev_nodes; // implicitly, length n_prev_nodes
+	int diagonal; // diagonal in the computational basis, so it commutes with every other diagonal operation
 };
 
 struct CircuitGraph

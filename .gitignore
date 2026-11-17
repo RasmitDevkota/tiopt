@@ -6,6 +6,8 @@ trap.data
 *.o
 /tests/tiopt-test
 /tests/tiopt-benchmark
+/tests/tiopt-schedule-benchmark
+/tests/schedule_benchmark.csv
 /examples/c/basic_trap
 /codesign.trap
 /designed.trap

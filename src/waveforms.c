@@ -12,6 +12,7 @@
 #include "ti_utils.h"
 #include "electrodynamics.h"
 #include "ions.h"
+#include "transport.h"
 
 // Allocate a waveform with n_waveform_steps steps for n_electrodes electrodes and n_wells wells
 struct TransportWaveform* allocate_transport_waveform
@@ -566,7 +567,8 @@ struct TransportWaveform* generate_transport_primitive
 
 // Convert a transport program into a waveform with a well for every ion, where each transport moves its target ions to
 // its destination along a minimum-jerk profile at the speed limit (starting late enough to arrive at its arrival time,
-// if one is given) while the other ions are held in place
+// if one is given) while the other ions are held in place; the moves of ions back into storage between operations are
+// not in the transport program, so they are left out (see schedule_trace_to_waveform)
 struct TransportWaveform* transport_program_to_waveform
 (
 	struct Trap *trap,
@@ -651,6 +653,143 @@ struct TransportWaveform* transport_program_to_waveform
 			trap,
 			ion_mass(ion), ion_charge(ion),
 			n_waveform_steps,
+			n_ions,
+			waveform->well_positions,
+			omega_axial,
+			WAVEFORM_ROUGHNESS_WEIGHT,
+			waveform->voltages
+		) != 0
+	)
+	{
+		free_transport_waveform(waveform);
+		return NULL;
+	}
+
+	return waveform;
+}
+
+// Order two doubles for qsort
+static int compare_doubles
+(
+	const void *a,
+	const void *b
+)
+{
+	double x = *(const double *) a;
+	double y = *(const double *) b;
+
+	return (x > y) - (x < y);
+}
+
+// Convert the timed moves of a schedule trace (see time_schedule_trace) into a waveform with a well for every ion,
+// where every move, including the moves back into storage, takes its ion between the centers of its zones along a
+// minimum-jerk profile from its departure to its arrival, so that moves which overlap in time happen at once, while
+// the ions which are not moving are held in place; each move takes n_steps_per_move steps. Returns NULL if no ion
+// moves or the voltages cannot be found
+struct TransportWaveform* schedule_trace_to_waveform
+(
+	struct Trap *trap,
+	struct IonParameters *ion,
+	struct TrapGraph *trap_graph,
+	struct TransportProgram *transport_program,
+	struct ScheduleTrace *trace,
+	const int n_steps_per_move,
+	const double omega_axial
+)
+{
+	int n_ions = transport_program->n_ions;
+	int n_steps_move = MAX(n_steps_per_move, 2);
+
+	// Steps over every move which takes time, without repeating the times moves share
+	int n_times = 0;
+	double *times = malloc(MAX(trace->n_moves * n_steps_move, 1) * sizeof(double));
+	for (int m = 0; m < trace->n_moves; m++)
+	{
+		struct IonMove *move = &trace->moves[m];
+		if (move->from_zone == move->to_zone || move->arrive <= move->depart)
+			continue;
+
+		for (int s = 0; s < n_steps_move; s++)
+			times[n_times++] = move->depart + (move->arrive - move->depart) * s / (n_steps_move - 1);
+	}
+
+	if (n_times == 0)
+	{
+		free(times);
+		return NULL;
+	}
+
+	qsort(times, n_times, sizeof(double), compare_doubles);
+
+	int n_steps = 1;
+	for (int s = 1; s < n_times; s++)
+		if (times[s] - times[n_steps - 1] > 1E-12)
+			times[n_steps++] = times[s];
+
+	struct TransportWaveform *waveform = allocate_transport_waveform(n_steps, trap->n_electrodes, n_ions);
+
+	// Moves of each ion in order
+	int *ion_move_starts = calloc(n_ions + 1, sizeof(int));
+	for (int m = 0; m < trace->n_moves; m++)
+		ion_move_starts[trace->moves[m].ion]++;
+	for (int i = 1; i <= n_ions; i++)
+		ion_move_starts[i] += ion_move_starts[i - 1];
+
+	int *ion_moves = malloc(MAX(trace->n_moves, 1) * sizeof(int));
+	int *ion_next = malloc(n_ions * sizeof(int));
+	memcpy(ion_next, ion_move_starts, n_ions * sizeof(int));
+	for (int m = 0; m < trace->n_moves; m++)
+		ion_moves[ion_next[trace->moves[m].ion - 1]++] = m;
+	memcpy(ion_next, ion_move_starts, n_ions * sizeof(int));
+
+	double (*positions)[3] = malloc(n_ions * sizeof(double[3]));
+	for (int i = 0; i < n_ions; i++)
+		memcpy(positions[i], transport_program->initial_positions[i], sizeof(double[3]));
+
+	for (int s = 0; s < n_steps; s++)
+	{
+		double t = times[s];
+		waveform->times[s] = t;
+
+		for (int i = 0; i < n_ions; i++)
+		{
+			// Finish the moves of the ion which are done by now
+			while (ion_next[i] < ion_move_starts[i + 1] && trace->moves[ion_moves[ion_next[i]]].arrive <= t)
+			{
+				memcpy(positions[i], trap_graph->zone_nodes[trace->moves[ion_moves[ion_next[i]]].to_zone].position, sizeof(double[3]));
+				ion_next[i]++;
+			}
+
+			double *well = waveform->well_positions[s * n_ions + i];
+			memcpy(well, positions[i], sizeof(double[3]));
+
+			if (ion_next[i] == ion_move_starts[i + 1])
+				continue;
+
+			struct IonMove *move = &trace->moves[ion_moves[ion_next[i]]];
+			if (move->depart < t)
+			{
+				double fraction = transport_profile((t - move->depart) / (move->arrive - move->depart));
+				double *start = trap_graph->zone_nodes[move->from_zone].position;
+				double *end = trap_graph->zone_nodes[move->to_zone].position;
+
+				for (int k = 0; k < 3; k++)
+					well[k] = start[k] + fraction * (end[k] - start[k]);
+			}
+		}
+	}
+
+	free(positions);
+	free(ion_next);
+	free(ion_moves);
+	free(ion_move_starts);
+	free(times);
+
+	if (
+		solve_waveform(
+			trap,
+			ion_mass(ion), ion_charge(ion),
+			n_steps,
 			n_ions,
 			waveform->well_positions,
 			omega_axial,

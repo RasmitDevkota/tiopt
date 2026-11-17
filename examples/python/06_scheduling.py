@@ -1,6 +1,5 @@
 """Scheduling example, which turns a circuit into a transport program on a line of zones and finds the waveform of each
-transport of the program, which shuttles the ions it moves (as one crystal in one well) to the zone of their next
-operation.
+move of the program, which shuttles an ion to the zone of its next operation or back into storage between operations.
 
 Note that Waveform.from_program instead holds every ion in its own harmonic well throughout the program, which needs
 very large voltages whenever an ion is brought into a zone where another ion is waiting, since the two wells have to
@@ -29,30 +28,30 @@ height = trap.find_rf_null((0.0, 0.0, None))[2]
 graph = tiopt.TrapGraph(types, capacities, -200.0, 200.0, height)
 program = tiopt.TransportProgram(graph, circuit)
 
-# Shuttle the ions of every transport from where they are to their destination, at 5 µm per µs
+# Shuttle the ion of every move (including the moves back into storage between operations) from its zone to the next,
+# at 5 µm per µs
 omega_axial = 2 * np.pi * 1e6
 speed = 5.0
 positions = program.initial_positions.copy()
 history_times = [0.0]
 history = [positions[:, 0].copy()]
 shuttles = []
-for targets, destination, arrival in zip(program.targets, program.destinations, program.arrival_times):
-    start = positions[targets[-1] - 1]
-    zone = types[int(np.argmin(np.abs(graph.positions[:, 0] - destination[0])))]
+for move in program.moves:
+    start, destination = graph.positions[move.from_zone], graph.positions[move.to_zone]
+    purpose = "back into storage" if move.transport < 0 else f"for instruction {move.transport + 1}"
     distance = np.linalg.norm(destination - start)
     if distance > 1e-9:
         duration = distance / speed * 1e-6
         start_null = trap.find_rf_null((start[0], 0.0, None))
         end_null = trap.find_rf_null((destination[0], 0.0, None))
         shuttle = tiopt.Waveform.transport(trap, ion, start_null, end_null, duration, 201, omega_axial)
-        max_force, max_frequency_error = shuttle.errors(trap, ion, omega_axial)
         shuttles.append(shuttle)
-        print(f"Ions {targets} to the {zone} zone (x = {destination[0]:.0f} µm) by {arrival * 1e6:.1f} µs: {duration * 1e6:.0f} µs shuttle, peak voltage {np.abs(shuttle.voltages).max():.2f} V")
+        print(f"Ion {move.ion} to the {types[move.to_zone]} zone (x = {destination[0]:.0f} µm) {purpose}, from {move.depart * 1e6:.1f} µs to "
+              f"{move.arrive * 1e6:.1f} µs in the program: {duration * 1e6:.0f} µs shuttle, peak voltage {np.abs(shuttle.voltages).max():.2f} V")
     else:
-        print(f"Ions {targets} are already in the {zone} zone at {arrival * 1e6:.1f} µs")
-    for target in targets:
-        positions[target - 1] = destination
-    history_times.append(arrival * 1e6)
+        print(f"Ion {move.ion} is already in the {types[move.to_zone]} zone {purpose} at {move.arrive * 1e6:.1f} µs")
+    positions[move.ion - 1] = destination
+    history_times.append(move.arrive * 1e6)
     history.append(positions[:, 0].copy())
 
 figure = Figure(figsize=(10, 4), layout="constrained")
@@ -63,7 +62,7 @@ for i in range(circuit.n_ions):
 for position, zone in zip(graph.positions[:, 0], types):
     ax.axhline(position, color="gray", linewidth=0.5, linestyle=":")
     ax.text(history_times[-1], position, f" {zone}", va="center", fontsize=7)
-ax.set_xlabel("Arrival time (µs)")
+ax.set_xlabel("Time of arrival (µs)")
 ax.set_ylabel("Zone position (µm, offset per ion)")
 ax.set_title("Transport program")
 ax.legend(fontsize=7)

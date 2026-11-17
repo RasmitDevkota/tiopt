@@ -82,6 +82,203 @@ void set_prev_nodes
 	}
 }
 
+// Layers of the diagonal operations of a batch placed one way (see compute_commuting_layers): 0 at the earliest layer
+// after the last operations on their qubits in order, 1 at the earliest free layer after the last non-diagonal
+// operations on their qubits in order, and 2 like 1 but with the operations on the busiest qubits first. Fills layers
+// with the layer of each operation of the batch and used with the layers each qubit is busy in, and returns the
+// highest layer of the batch, with the sum of the last layers of its qubits in sum
+static int place_diagonal_batch
+(
+	struct CircuitGraph *circuit_graph,
+	const int *batch,
+	int n_batch,
+	int method,
+	const int *ready,
+	const int *last,
+	int n_slots,
+	char *used,
+	int *layers,
+	long *sum
+)
+{
+	int n_ions = circuit_graph->n_ions;
+
+	// Order of the operations, by how busy their busiest qubit is in the batch (and then in order) for method 2
+	int *order = malloc(n_batch * sizeof(int));
+	int *degree = calloc(n_ions, sizeof(int));
+	int *key = malloc(n_batch * sizeof(int));
+	for (int k = 0; k < n_batch; k++)
+	{
+		struct InstructionNode *node = &circuit_graph->instruction_nodes[batch[k]];
+		for (int t = 0; t < node->n_target_ions; t++)
+			degree[node->target_ions[t] - 1]++;
+	}
+	for (int k = 0; k < n_batch; k++)
+	{
+		struct InstructionNode *node = &circuit_graph->instruction_nodes[batch[k]];
+		key[k] = 0;
+		for (int t = 0; t < node->n_target_ions; t++)
+			key[k] = MAX(key[k], degree[node->target_ions[t] - 1]);
+
+		int j = k;
+		while (method == 2 && j > 0 && key[order[j - 1]] < key[k])
+		{
+			order[j] = order[j - 1];
+			j--;
+		}
+		order[j] = k;
+	}
+
+	int *qubit_last = malloc(n_ions * sizeof(int));
+	memcpy(qubit_last, last, n_ions * sizeof(int));
+
+	int highest = 0;
+	for (int o = 0; o < n_batch; o++)
+	{
+		int k = order[o];
+		struct InstructionNode *node = &circuit_graph->instruction_nodes[batch[k]];
+
+		int layer = 1;
+		for (int t = 0; t < node->n_target_ions; t++)
+		{
+			int q = node->target_ions[t] - 1;
+			layer = MAX(layer, ((method == 0) ? qubit_last[q] : ready[q]) + 1);
+		}
+
+		// The earliest layer in which none of the qubits is busy
+		for (int busy = 1; busy && method != 0; )
+		{
+			busy = 0;
+			for (int t = 0; t < node->n_target_ions; t++)
+				busy |= used[(node->target_ions[t] - 1) * n_slots + layer];
+			layer += busy;
+		}
+
+		layers[k] = layer;
+		highest = MAX(highest, layer);
+		for (int t = 0; t < node->n_target_ions; t++)
+		{
+			int q = node->target_ions[t] - 1;
+			used[q * n_slots + layer] = 1;
+			qubit_last[q] = MAX(qubit_last[q], layer);
+		}
+	}
+
+	*sum = 0;
+	for (int q = 0; q < n_ions; q++)
+		*sum += (degree[q] > 0) ? qubit_last[q] : 0;
+
+	free(qubit_last);
+	free(key);
+	free(degree);
+	free(order);
+
+	return highest;
+}
+
+// Assign every instruction node to a layer like compute_circuit_layers, but letting operations which are diagonal in the
+// computational basis (which all commute with each other) change places, to fit them into fewer layers: diagonal
+// operations wait in a batch until a non-diagonal operation (or the end of the circuit) comes, and then each batch is
+// placed in whichever of three ways ends it soonest (see place_diagonal_batch), where none of them puts two operations
+// on the same qubit in the same layer, or a diagonal operation before the last non-diagonal operation on its qubits
+void compute_commuting_layers
+(
+	struct CircuitGraph *circuit_graph
+)
+{
+	int n_nodes = circuit_graph->n_instruction_nodes;
+	int n_ions = MAX(circuit_graph->n_ions, 1);
+	int n_slots = n_nodes + 2;
+
+	int *ready = calloc(n_ions, sizeof(int)); // layer of the last non-diagonal operation on each qubit
+	int *last = calloc(n_ions, sizeof(int)); // last layer each qubit is busy in
+	char *used = calloc((size_t) n_ions * n_slots, sizeof(char)); // layers each qubit is busy in with diagonal operations
+	char *trial = malloc((size_t) n_ions * n_slots * sizeof(char));
+	int *batch = malloc(MAX(n_nodes, 1) * sizeof(int));
+	int *layers = malloc(MAX(n_nodes, 1) * sizeof(int));
+	int *best_layers = malloc(MAX(n_nodes, 1) * sizeof(int));
+	int n_batch = 0;
+
+	for (int i = 0; i <= n_nodes; i++)
+	{
+		struct InstructionNode *node = (i < n_nodes) ? &circuit_graph->instruction_nodes[i] : NULL;
+
+		if (node != NULL && node->diagonal)
+		{
+			batch[n_batch++] = i;
+			continue;
+		}
+
+		// Place the waiting diagonal operations
+		if (n_batch > 0)
+		{
+			int best_method = -1;
+			int best_highest = 0;
+			long best_sum = 0;
+			for (int method = 0; method < 3; method++)
+			{
+				memcpy(trial, used, (size_t) n_ions * n_slots);
+				long sum;
+				int highest = place_diagonal_batch(
+					circuit_graph,
+					batch, n_batch,
+					method,
+					ready, last,
+					n_slots, trial,
+					layers, &sum
+				);
+
+				if (best_method < 0 || highest < best_highest || (highest == best_highest && sum < best_sum))
+				{
+					best_method = method;
+					best_highest = highest;
+					best_sum = sum;
+					memcpy(best_layers, layers, n_batch * sizeof(int));
+				}
+			}
+
+			for (int k = 0; k < n_batch; k++)
+			{
+				struct InstructionNode *batch_node = &circuit_graph->instruction_nodes[batch[k]];
+				circuit_graph->layer_idxs[batch[k]] = best_layers[k];
+
+				for (int t = 0; t < batch_node->n_target_ions; t++)
+				{
+					int q = batch_node->target_ions[t] - 1;
+					used[q * n_slots + best_layers[k]] = 1;
+					last[q] = MAX(last[q], best_layers[k]);
+				}
+			}
+
+			n_batch = 0;
+		}
+
+		if (node == NULL)
+			break;
+
+		// A non-diagonal operation follows everything on its qubits
+		int layer = 1;
+		for (int t = 0; t < node->n_target_ions; t++)
+			layer = MAX(layer, last[node->target_ions[t] - 1] + 1);
+
+		circuit_graph->layer_idxs[i] = layer;
+		for (int t = 0; t < node->n_target_ions; t++)
+		{
+			int q = node->target_ions[t] - 1;
+			ready[q] = layer;
+			last[q] = layer;
+		}
+	}
+
+	free(best_layers);
+	free(layers);
+	free(batch);
+	free(trial);
+	free(used);
+	free(last);
+	free(ready);
+}
+
 // Assign every instruction node to the earliest layer (starting at 1) after the layers of all of its previous nodes
 void compute_circuit_layers
 (
@@ -135,6 +332,53 @@ static double operation_duration
 	return GATE_DURATION;
 }
 
+// Sort nodes by their layers (which start at 1), keeping their order within each layer, so that each layer can be
+// visited without scanning every node; allocates order (the indices of the nodes, layer by layer) and layer_starts (of
+// length n_layers + 1, where layer l takes up order[layer_starts[l-1]] to order[layer_starts[l]-1]), and returns the
+// number of layers
+int sort_layers
+(
+	int n_nodes,
+	const int *layer_idxs,
+	int **order,
+	int **layer_starts
+)
+{
+	int n_layers = 0;
+	for (int i = 0; i < n_nodes; i++)
+		n_layers = MAX(n_layers, layer_idxs[i]);
+
+	// Counting sort, which is stable
+	*layer_starts = calloc(n_layers + 1, sizeof(int));
+	for (int i = 0; i < n_nodes; i++)
+		(*layer_starts)[layer_idxs[i]]++;
+
+	for (int l = 1; l <= n_layers; l++)
+		(*layer_starts)[l] += (*layer_starts)[l - 1];
+
+	int *next = malloc((n_layers + 1) * sizeof(int));
+	memcpy(next, *layer_starts, (n_layers + 1) * sizeof(int));
+
+	*order = malloc(MAX(n_nodes, 1) * sizeof(int));
+	for (int i = 0; i < n_nodes; i++)
+		(*order)[next[layer_idxs[i] - 1]++] = i;
+
+	free(next);
+
+	return n_layers;
+}
+
+// Sort the instruction nodes of a circuit by layer (see sort_layers)
+int sort_circuit_layers
+(
+	struct CircuitGraph *circuit_graph,
+	int **order,
+	int **layer_starts
+)
+{
+	return sort_layers(circuit_graph->n_instruction_nodes, circuit_graph->layer_idxs, order, layer_starts);
+}
+
 // Schedule the arrival time of every transport of a transport program, where each layer of the circuit starts once the
 // slowest transport into it (at TRANSPORT_SPEED_LIMIT) has finished, and lasts as long as its slowest operation
 void schedule_arrival_times
@@ -162,9 +406,9 @@ void schedule_arrival_times_in_rounds
 		for (int k = 0; k < 3; k++)
 			ion_positions[i][k] = transport_program->initial_positions[i][k];
 
-	int max_layer = 0;
-	for (int i = 0; i < circuit_graph->n_instruction_nodes; i++)
-		max_layer = MAX(max_layer, rounds[i]);
+	int *order;
+	int *layer_starts;
+	int max_layer = sort_layers(circuit_graph->n_instruction_nodes, rounds, &order, &layer_starts);
 
 	double time = 0.0;
 	for (int layer = 1; layer <= max_layer; layer++)
@@ -172,10 +416,9 @@ void schedule_arrival_times_in_rounds
 		double max_distance = 0.0;
 		double max_duration = 0.0;
 
-		for (int i = 0; i < circuit_graph->n_instruction_nodes; i++)
+		for (int o = layer_starts[layer - 1]; o < layer_starts[layer]; o++)
 		{
-			if (rounds[i] != layer)
-				continue;
+			int i = order[o];
 
 			for (int t = 0; t < transport_program->transport_n_targets_list[i]; t++)
 			{
@@ -190,10 +433,9 @@ void schedule_arrival_times_in_rounds
 
 		time += max_distance / TRANSPORT_SPEED_LIMIT;
 
-		for (int i = 0; i < circuit_graph->n_instruction_nodes; i++)
+		for (int o = layer_starts[layer - 1]; o < layer_starts[layer]; o++)
 		{
-			if (rounds[i] != layer)
-				continue;
+			int i = order[o];
 
 			transport_program->arrival_times[i] = time;
 
@@ -205,7 +447,143 @@ void schedule_arrival_times_in_rounds
 		time += max_duration;
 	}
 
+	free(order);
+	free(layer_starts);
 	free(ion_positions);
+}
+
+// Distance between the centers of two zones of a trap graph (µm)
+static double zone_distance
+(
+	struct TrapGraph *trap_graph,
+	int from_zone,
+	int to_zone
+)
+{
+	double *a = trap_graph->zone_nodes[from_zone].position;
+	double *b = trap_graph->zone_nodes[to_zone].position;
+
+	return sqrt(pow(b[0] - a[0], 2) + pow(b[1] - a[1], 2) + pow(b[2] - a[2], 2));
+}
+
+// Time every move of a schedule trace (whose transport_rounds and n_rounds are set) and the arrival time of every
+// transport of its program, at TRANSPORT_SPEED_LIMIT: each round first moves ions back into storage (an ion's moves one
+// after another, different ions at once), then moves the ions of its operations into their zones (all at once, from
+// where they actually are), and then runs its operations, which all start once the slowest transport has arrived and
+// last as long as the slowest one. A move back into storage belongs to the round of the next transport after it in the
+// trace, and those after the last transport happen once the last round is done
+void time_schedule_trace
+(
+	struct TrapGraph *trap_graph,
+	struct CircuitGraph *circuit_graph,
+	struct TransportProgram *transport_program,
+	struct ScheduleTrace *trace
+)
+{
+	int n_ions = transport_program->n_ions;
+	int n_rounds = trace->n_rounds;
+	int *rounds = trace->transport_rounds;
+
+	int n_moves = trace->n_moves;
+	int n_nodes = circuit_graph->n_instruction_nodes;
+
+	// Round of every move
+	int *move_rounds = malloc(MAX(n_moves, 1) * sizeof(int));
+	int next_round = n_rounds + 1;
+	for (int m = n_moves - 1; m >= 0; m--)
+	{
+		if (trace->moves[m].transport >= 0)
+			next_round = rounds[trace->moves[m].transport];
+
+		move_rounds[m] = next_round;
+	}
+
+	// Moves and instructions of each round, in order
+	int *move_starts = calloc(n_rounds + 3, sizeof(int));
+	int *node_starts = calloc(n_rounds + 3, sizeof(int));
+	for (int m = 0; m < n_moves; m++)
+		move_starts[move_rounds[m] + 1]++;
+	for (int i = 0; i < n_nodes; i++)
+		node_starts[rounds[i] + 1]++;
+	for (int r = 1; r <= n_rounds + 2; r++)
+	{
+		move_starts[r] += move_starts[r - 1];
+		node_starts[r] += node_starts[r - 1];
+	}
+
+	int *round_moves = malloc(MAX(n_moves, 1) * sizeof(int));
+	int *round_nodes = malloc(MAX(n_nodes, 1) * sizeof(int));
+	int *next = malloc((n_rounds + 2) * sizeof(int));
+	memcpy(next, move_starts, (n_rounds + 2) * sizeof(int));
+	for (int m = 0; m < n_moves; m++)
+		round_moves[next[move_rounds[m]]++] = m;
+	memcpy(next, node_starts, (n_rounds + 2) * sizeof(int));
+	for (int i = 0; i < n_nodes; i++)
+		round_nodes[next[rounds[i]]++] = i;
+
+	// When each ion is free to make its next move back into storage in the round it last moved in
+	double *ion_times = malloc(MAX(n_ions, 1) * sizeof(double));
+	int *ion_rounds = calloc(MAX(n_ions, 1), sizeof(int));
+
+	double time = 0.0;
+	for (int round = 1; round <= n_rounds + 1; round++)
+	{
+		// Moves back into storage
+		double transport_start = time;
+		for (int k = move_starts[round]; k < move_starts[round + 1]; k++)
+		{
+			struct IonMove *move = &trace->moves[round_moves[k]];
+			if (move->transport >= 0)
+				continue;
+
+			int ion = move->ion - 1;
+			if (ion_rounds[ion] != round)
+			{
+				ion_rounds[ion] = round;
+				ion_times[ion] = time;
+			}
+
+			move->depart = ion_times[ion];
+			move->arrive = move->depart + zone_distance(trap_graph, move->from_zone, move->to_zone) / TRANSPORT_SPEED_LIMIT;
+			ion_times[ion] = move->arrive;
+			transport_start = MAX(transport_start, move->arrive);
+		}
+
+		// Moves into the zones of the operations
+		double max_transport = 0.0;
+		for (int k = move_starts[round]; k < move_starts[round + 1]; k++)
+		{
+			struct IonMove *move = &trace->moves[round_moves[k]];
+			if (move->transport < 0)
+				continue;
+
+			double duration = zone_distance(trap_graph, move->from_zone, move->to_zone) / TRANSPORT_SPEED_LIMIT;
+			move->depart = transport_start;
+			move->arrive = transport_start + duration;
+			max_transport = MAX(max_transport, duration);
+		}
+
+		// Operations
+		double max_duration = 0.0;
+		for (int k = node_starts[round]; k < node_starts[round + 1]; k++)
+		{
+			int i = round_nodes[k];
+
+			transport_program->arrival_times[i] = transport_start + max_transport;
+			max_duration = MAX(max_duration, operation_duration(&circuit_graph->instruction_nodes[i]));
+		}
+
+		time = transport_start + max_transport + max_duration;
+	}
+
+	free(ion_rounds);
+	free(ion_times);
+	free(next);
+	free(round_nodes);
+	free(round_moves);
+	free(node_starts);
+	free(move_starts);
+	free(move_rounds);
 }
 
 // Generate a trap graph of zones evenly spaced along the trap axis at the given height, connected in a line
@@ -341,7 +719,11 @@ struct ZoneNode* select_operation_zone
 		if (zone->zone_occupancy - n_present + n_targets > zone->zone_capacity)
 			continue;
 
-		double distance = sqrt(pow(zone->position[0] - centroid[0], 2) + pow(zone->position[1] - centroid[1], 2) + pow(zone->position[2] - centroid[2], 2));
+		// Squared distances, which order the zones the same way
+		double dx = zone->position[0] - centroid[0];
+		double dy = zone->position[1] - centroid[1];
+		double dz = zone->position[2] - centroid[2];
+		double distance = dx * dx + dy * dy + dz * dz;
 
 		if (distance < nearest_distance)
 		{
@@ -364,7 +746,7 @@ void release_operation_zones
 	int n_ions
 )
 {
-	release_ions(trap_graph, ion_states, n_ions, NULL);
+	release_ions(trap_graph, ion_states, n_ions, NULL, NULL);
 }
 
 // Record a move of an ion in a schedule trace, if there is one
@@ -387,15 +769,17 @@ void record_ion_move
 		trace->moves = realloc(trace->moves, trace->max_moves * sizeof(struct IonMove));
 	}
 
-	trace->moves[trace->n_moves++] = (struct IonMove) { ion, (int) (from - trap_graph->zone_nodes), (int) (to - trap_graph->zone_nodes), transport };
+	trace->moves[trace->n_moves++] = (struct IonMove) { ion, (int) (from - trap_graph->zone_nodes), (int) (to - trap_graph->zone_nodes), transport, 0.0, 0.0 };
 }
 
-// As release_operation_zones, but recording the moves in trace (if it is not NULL)
+// As release_operation_zones, but leaving the ions for which keep is set (if keep is not NULL) where they are, and
+// recording the moves in trace (if it is not NULL)
 void release_ions
 (
 	struct TrapGraph *trap_graph,
 	struct ZoneNode **ion_states,
 	int n_ions,
+	const int *keep,
 	struct ScheduleTrace *trace
 )
 {
@@ -406,6 +790,9 @@ void release_ions
 		struct ZoneNode *zone = ion_states[i];
 
 		if (!(zone->zone_type & (GATE_ZONE | MEASURE_ZONE | COOL_ZONE)) || (zone->zone_type & STORAGE_ZONE))
+			continue;
+
+		if (keep != NULL && keep[i])
 			continue;
 
 		int target = i + 1;

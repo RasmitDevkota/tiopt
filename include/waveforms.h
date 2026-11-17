@@ -145,6 +145,19 @@ struct TransportWaveform* transport_program_to_waveform
 	const double omega_axial
 );
 
+struct ScheduleTrace;
+
+struct TransportWaveform* schedule_trace_to_waveform
+(
+	struct Trap *trap,
+	struct IonParameters *ion,
+	struct TrapGraph *trap_graph,
+	struct TransportProgram *transport_program,
+	struct ScheduleTrace *trace,
+	const int n_steps_per_move,
+	const double omega_axial
+);
+
 void evaluate_waveform_errors
 (
 	struct Trap *trap,

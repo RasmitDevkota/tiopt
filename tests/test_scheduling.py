@@ -67,7 +67,110 @@ def test_waveform_for_schedule(solved_trap, ion, circuit):
     program = tiopt.TransportProgram(trap_graph, circuit)
     waveform = tiopt.Waveform.from_program(solved_trap, ion, program, 21)
     assert waveform.n_wells == 4
-    assert waveform.n_steps == 21 * program.n_transports
-    assert np.all(np.diff(waveform.times) >= 0)
-    # After the last transport, every ion is in the measure zone
-    np.testing.assert_allclose(waveform.well_positions[-1, :, 0], 150.0)
+    # 21 steps over every move which takes time, where moves which happen at once share their steps
+    moving = [m for m in program.moves if m.arrive > m.depart]
+    assert 21 <= waveform.n_steps <= 21 * len(moving)
+    assert np.all(np.diff(waveform.times) > 0)
+    # Every move, including the moves back into storage, brings its ion to the center of its zone when it arrives
+    for move in moving:
+        step = int(np.argmin(np.abs(waveform.times - move.arrive)))
+        assert waveform.times[step] == pytest.approx(move.arrive)
+        assert waveform.well_positions[step, move.ion - 1, 0] == pytest.approx(trap_graph.positions[move.to_zone, 0])
+    # Every ion is in the measure zone for the measurement, and back in storage at the end
+    measurement = int(np.argmin(np.abs(waveform.times - program.arrival_times[-1])))
+    np.testing.assert_allclose(waveform.well_positions[measurement, :, 0], 150.0)
+    np.testing.assert_allclose(waveform.well_positions[-1, :, 0], -50.0)
+
+
+def test_program_times_every_move(circuit):
+    trap_graph = tiopt.TrapGraph(ZONES, CAPACITIES, -150.0, 150.0)
+    program = tiopt.TransportProgram(trap_graph, circuit, "rounds")
+    moves = program.moves
+    assert program.n_rounds == 9
+    np.testing.assert_array_equal(np.unique(program.rounds), np.arange(1, 10))
+    # The ions go back into storage between operations, and those moves take time too
+    releases = [m for m in moves if m.transport < 0]
+    assert releases and all(m.arrive > m.depart for m in releases)
+    for move in moves:
+        distance = abs(trap_graph.positions[move.to_zone, 0] - trap_graph.positions[move.from_zone, 0])
+        assert move.arrive - move.depart == pytest.approx(distance / tiopt.TRANSPORT_SPEED_LIMIT)
+        if move.transport >= 0:
+            assert move.arrive <= program.arrival_times[move.transport] + 1e-12
+    # Each ion makes one move at a time
+    for ion in range(1, program.n_ions + 1):
+        own = [m for m in moves if m.ion == ion]
+        assert all(b.depart >= a.arrive - 1e-12 for a, b in zip(own, own[1:]))
+    with pytest.raises(ValueError):
+        tiopt.TransportProgram(trap_graph, circuit, "unknown")
+
+
+def _replay_is_valid(program, trap_graph, circuit):
+    """Whether every operation finds its ions in its zone once its round has arrived, with no zone over capacity."""
+    capacities = trap_graph.capacities
+    zones = {ion: 0 for ion in range(1, program.n_ions + 1)}
+    rounds = program.rounds
+    moves = program.moves
+    for k, move in enumerate(moves):
+        zones[move.ion] = move.to_zone
+        if move.transport < 0:
+            continue
+        later = moves[k + 1] if k + 1 < len(moves) else None
+        if later is not None and later.transport >= 0 and rounds[later.transport] == rounds[move.transport]:
+            continue
+        occupancy = np.bincount(list(zones.values()), minlength=len(capacities))
+        if np.any(occupancy > capacities):
+            return False
+        for t in np.flatnonzero(rounds == rounds[move.transport]):
+            for ion in circuit.instructions[t].targets:
+                if trap_graph.positions[zones[ion], 0] != pytest.approx(program.destinations[t, 0]):
+                    return False
+    return True
+
+
+@pytest.mark.parametrize("strategy", ["lookahead", "layer-assign"])
+def test_lookahead_layers(repository, strategy):
+    circuit = tiopt.Circuit(repository / "tests" / "quantumcircuits" / "lookahead_gap.qasm")
+    def program(**kwargs):
+        graph = tiopt.TrapGraph(["load+storage", "gate", "gate", "measure"], [4, 4, 4, 4], 0.0, 300.0)
+        return graph, tiopt.TransportProgram(graph, circuit, strategy, **kwargs)
+
+    default = program()[1]
+    assert default.lookahead_layers == tiopt.DEFAULT_LOOKAHEAD_LAYERS == 1
+    for kwargs in ({"lookahead_layers": 1}, {"lookahead_layers": 0}):
+        same = program(**kwargs)[1]
+        assert same.lookahead_layers == 1
+        assert same.moves == default.moves
+        np.testing.assert_array_equal(same.arrival_times, default.arrival_times)
+
+    # Looking further ahead, qubit 1 waits in the gate zone through the layer it is not used in, instead of going back
+    # into storage, and the schedule stays valid
+    for depth, goes_back in ((1, True), (3, False)):
+        graph, scheduled = program(lookahead_layers=depth)
+        assert scheduled.lookahead_layers == depth
+        assert _replay_is_valid(scheduled, graph, circuit)
+        back = [m for m in scheduled.moves if m.ion == 1 and m.transport < 0 and m.arrive <= scheduled.arrival_times[2]]
+        assert bool(back) == goes_back
+
+
+def test_commute_moves_diagonal_gates_into_fewer_rounds(repository):
+    circuit = tiopt.Circuit(repository / "tests" / "quantumcircuits" / "benchmarks" / "qaoa_06.qasm")
+    layers = [i.layer for i in circuit.instructions]
+    assert sum(i.diagonal for i in circuit.instructions) == 18
+    rounds = {}
+    for commute in (False, True):
+        graph = tiopt.TrapGraph.from_layout("load, storage x2, gate x5, measure", 100.0, circuit.n_ions)
+        program = tiopt.TransportProgram(graph, circuit, "layer-assign", commute=commute)
+        assert program.commute == commute
+        assert _replay_is_valid(program, graph, circuit)
+        rounds[commute] = program.n_rounds
+        # Operations on the same ion run in different rounds, in the order of the circuit unless both commute
+        instructions = circuit.instructions
+        for i in range(len(instructions)):
+            for j in range(i + 1, len(instructions)):
+                if set(instructions[i].targets) & set(instructions[j].targets):
+                    assert program.rounds[i] != program.rounds[j]
+                    if program.rounds[i] > program.rounds[j]:
+                        assert commute and instructions[i].diagonal and instructions[j].diagonal
+        # The layers of the circuit itself are unchanged
+        assert [i.layer for i in circuit.instructions] == layers
+    assert rounds[True] < rounds[False]

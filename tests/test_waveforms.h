@@ -39,3 +39,8 @@ int test_compute_U_pond
 (
 	double atol
 );
+
+int test_schedule_trace_to_waveform
+(
+	double atol
+);
