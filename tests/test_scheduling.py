@@ -67,7 +67,38 @@ def test_waveform_for_schedule(solved_trap, ion, circuit):
     program = tiopt.TransportProgram(trap_graph, circuit)
     waveform = tiopt.Waveform.from_program(solved_trap, ion, program, 21)
     assert waveform.n_wells == 4
-    assert waveform.n_steps == 21 * program.n_transports
-    assert np.all(np.diff(waveform.times) >= 0)
-    # After the last transport, every ion is in the measure zone
-    np.testing.assert_allclose(waveform.well_positions[-1, :, 0], 150.0)
+    # 21 steps over every move which takes time, where moves which happen at once share their steps
+    moving = [m for m in program.moves if m.arrive > m.depart]
+    assert 21 <= waveform.n_steps <= 21 * len(moving)
+    assert np.all(np.diff(waveform.times) > 0)
+    # Every move, including the moves back into storage, brings its ion to the center of its zone when it arrives
+    for move in moving:
+        step = int(np.argmin(np.abs(waveform.times - move.arrive)))
+        assert waveform.times[step] == pytest.approx(move.arrive)
+        assert waveform.well_positions[step, move.ion - 1, 0] == pytest.approx(trap_graph.positions[move.to_zone, 0])
+    # Every ion is in the measure zone for the measurement, and back in storage at the end
+    measurement = int(np.argmin(np.abs(waveform.times - program.arrival_times[-1])))
+    np.testing.assert_allclose(waveform.well_positions[measurement, :, 0], 150.0)
+    np.testing.assert_allclose(waveform.well_positions[-1, :, 0], -50.0)
+
+
+def test_program_times_every_move(circuit):
+    trap_graph = tiopt.TrapGraph(ZONES, CAPACITIES, -150.0, 150.0)
+    program = tiopt.TransportProgram(trap_graph, circuit, "rounds")
+    moves = program.moves
+    assert program.n_rounds == 9
+    np.testing.assert_array_equal(np.unique(program.rounds), np.arange(1, 10))
+    # The ions go back into storage between operations, and those moves take time too
+    releases = [m for m in moves if m.transport < 0]
+    assert releases and all(m.arrive > m.depart for m in releases)
+    for move in moves:
+        distance = abs(trap_graph.positions[move.to_zone, 0] - trap_graph.positions[move.from_zone, 0])
+        assert move.arrive - move.depart == pytest.approx(distance / tiopt.TRANSPORT_SPEED_LIMIT)
+        if move.transport >= 0:
+            assert move.arrive <= program.arrival_times[move.transport] + 1e-12
+    # Each ion makes one move at a time
+    for ion in range(1, program.n_ions + 1):
+        own = [m for m in moves if m.ion == ion]
+        assert all(b.depart >= a.arrive - 1e-12 for a, b in zip(own, own[1:]))
+    with pytest.raises(ValueError):
+        tiopt.TransportProgram(trap_graph, circuit, "unknown")

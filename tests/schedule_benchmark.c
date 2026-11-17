@@ -326,6 +326,7 @@ int main
 
 	int n_mismatches = 0;
 	int n_worse = 0;
+	int n_timing = 0;
 
 	struct dirent **entries;
 	int n_entries = scandir(CIRCUIT_DIR, &entries, NULL, alphasort);
@@ -382,9 +383,23 @@ int main
 				result->scheduled = (programs[s] != NULL);
 
 				if (programs[s] != NULL)
+				{
 					evaluate_schedule(&trap_graph, circuit_graph, programs[s], &traces[s], result);
 
-				// Time the scheduler alone, without the trace
+					// The arrival times of the program must give the makespan found here from the moves of the ions,
+					// including the moves back into storage
+					double program_makespan = 0.0;
+					for (int i = 0; i < circuit_graph->n_instruction_nodes; i++)
+						program_makespan = MAX(program_makespan, programs[s]->arrival_times[i] + operation_duration(&circuit_graph->instruction_nodes[i]));
+
+					if (fabs(program_makespan - result->makespan) > 1E-9 * MAX(result->makespan, 1E-6))
+					{
+						printf("  TIMING: %s program ends at %.2f us, but its moves take %.2f us\n", strategy_names[s], 1E6 * program_makespan, 1E6 * result->makespan);
+						n_timing++;
+					}
+				}
+
+				// Time the scheduler without a trace of our own (it still times every move with a trace of its own)
 				double run_times[MAX_RUNS];
 				int n_runs = 0;
 				double start = wall_time();
@@ -464,7 +479,7 @@ int main
 		printf("\nWrote %s\n", csv_filename);
 	}
 
-	printf("%d mismatches between the fast and baseline schedules, %d invalid schedules or schedules slower than rounds\n", n_mismatches, n_worse);
+	printf("%d mismatches between the fast and baseline schedules, %d invalid schedules or schedules slower than rounds, %d programs whose arrival times disagree with their moves\n", n_mismatches, n_worse, n_timing);
 
-	return (n_mismatches > 0 || n_worse > 0);
+	return (n_mismatches > 0 || n_worse > 0 || n_timing > 0);
 }

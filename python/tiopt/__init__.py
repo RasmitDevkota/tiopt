@@ -15,6 +15,8 @@ from .lib import (
     ION_HEIGHT,
     LENGTH_SCALE,
     TRANSPORT_SPEED_LIMIT,
+    SCHEDULE_STRATEGIES,
+    ScheduleMove,
     Circuit,
     Grating,
     Instruction,

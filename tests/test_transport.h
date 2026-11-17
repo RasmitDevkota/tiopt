@@ -44,3 +44,8 @@ int test_parse_qasm_rejects_unknown_gates
 (
 	double atol
 );
+
+int test_schedule_trace_times
+(
+	double atol
+);

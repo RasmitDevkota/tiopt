@@ -9,6 +9,11 @@ this module decides when every transport leaves and how long it takes:
 - "as soon as possible": transports leave as soon as their ions are idle and move at full speed, so that ions arrive
   early and wait in the zone of their next operation
 
+When the program records every move of the ions (TransportProgram.moves), the moves back into storage between
+operations are planned too: they come before the transport to the next operation, in "just in time" mode as soon as
+the ion is idle and at full speed (so that it waits, and can be cooled, in storage), and otherwise along with that
+transport (back to back from when the ion is idle, sharing the time there is in eager mode).
+
 Every plan follows the mean phonon number of each ion, which grows at the heating rate, jumps by the coherent excitation
 of every transport (for a well moved along a minimum-jerk profile), and returns to that after cooling if the ion waits
 long enough in a zone where it can be cooled. The operations themselves start at the same times in every mode, since
@@ -64,7 +69,9 @@ class Timing:
 
 @dataclass
 class Transport:
-    """Transport of one ion for an operation, from a position to a destination (µm)."""
+    """Transport of one ion for an operation (instruction), or back into storage between operations (instruction -1),
+    from a position to a destination (µm).
+    """
 
     instruction: int
     ion: int
@@ -206,33 +213,83 @@ def plan(program, circuit, zone_positions, zone_types, timing=None, mode="eager"
             n_bar[ion] += timing.heating_rate * (end - start)
             result.segments.append((ion, start, end, "waiting"))
 
+    def fast_time(distance):
+        return max(distance / timing.max_speed, timing.min_duration) if distance > 1e-9 else 0.0
+
+    def slow_time(distance):
+        return max(distance / timing.min_speed, fast_time(distance)) if distance > 1e-9 else 0.0
+
+    def move(j, instruction, start, destination, depart, arrive):
+        """Move ion j from start to destination between depart and arrive."""
+        excitation = transport_excitation(float(np.linalg.norm(destination - start)), arrive - depart, timing.omega_axial, timing.mass)
+        n_bar[j] += timing.heating_rate * (arrive - depart) + excitation
+        result.transports.append(Transport(instruction, j, start.copy(), destination.copy(), depart, arrive, excitation))
+        result.segments.append((j, depart, arrive, "transport"))
+
+    # Destinations of the moves of each ion back into storage before each of its transports (those after its last
+    # operation do not affect the circuit, so they are left out)
+    returns = {}
+    moves = getattr(program, "moves", None)
+    if moves is not None:
+        since = {}
+        for m in moves:
+            if m.transport < 0:
+                since.setdefault(m.ion - 1, []).append(zone_positions[m.to_zone])
+            else:
+                returns[m.transport, m.ion - 1] = since.pop(m.ion - 1, [])
+
     for i, (targets, destination) in enumerate(zip(program.targets, program.destinations)):
         ions = [t - 1 for t in targets]
         kind = _kind(instructions[i], len(ions))
         duration = {"measurement": timing.detection_time, "two-qubit gate": timing.two_qubit_time}.get(kind, timing.single_qubit_time)
         zone = zone_of(destination)
-        distances = {j: float(np.linalg.norm(destination - positions[j])) for j in ions}
-        fast = {j: max(d / timing.max_speed, timing.min_duration) if d > 1e-9 else 0.0 for j, d in distances.items()}
-        start = max([zone_free[zone] if zone >= 0 else 0.0] + [free[j] + fast[j] for j in ions])
+        destination = np.array(destination, dtype=float)
+
+        # Legs of every ion: its moves back into storage, then its transport to the operation, leaving out those which
+        # do not move it
+        legs = {}
+        for j in ions:
+            stops = [positions[j]] + list(returns.get((i, j), [])) + [destination]
+            legs[j] = [(a, b, float(np.linalg.norm(b - a)), k == len(stops) - 2) for k, (a, b) in enumerate(zip(stops[:-1], stops[1:]))]
+            legs[j] = [leg for leg in legs[j] if leg[2] > 1e-9]
+        start = max([zone_free[zone] if zone >= 0 else 0.0] + [free[j] + sum(fast_time(leg[2]) for leg in legs[j]) for j in ions])
 
         for j in ions:
-            if distances[j] <= 1e-9:
+            if not legs[j]:
                 wait(j, free[j], start, zone)
                 continue
+            fast = [fast_time(leg[2]) for leg in legs[j]]
             if mode == "just in time":
-                depart, arrive = start - fast[j], start
-            elif mode == "eager":
-                slowest = max(distances[j] / timing.min_speed, fast[j])
-                depart = free[j]
-                arrive = min(start, depart + slowest)
+                # Back into storage as soon as idle, and on to the operation just in time
+                times, t = [], free[j]
+                for leg, f in zip(legs[j][:-1], fast[:-1]):
+                    times.append((t, t + f))
+                    t += f
+                times.append((start - fast[-1], start) if legs[j][-1][3] else (t, t + fast[-1]))
             else:
-                depart, arrive = free[j], free[j] + fast[j]
-            wait(j, free[j], depart, zone_of(positions[j]))
-            excitation = transport_excitation(distances[j], arrive - depart, timing.omega_axial, timing.mass)
-            n_bar[j] += timing.heating_rate * (arrive - depart) + excitation
-            result.transports.append(Transport(i, j, positions[j].copy(), np.array(destination, dtype=float), depart, arrive, excitation))
-            result.segments.append((j, depart, arrive, "transport"))
-            wait(j, arrive, start, -1)
+                if mode == "eager":
+                    # As slowly as there is time for, sharing the time between the legs by how much they can slow down
+                    slow = [slow_time(leg[2]) for leg in legs[j]]
+                    available = start - free[j]
+                    if sum(slow) <= available:
+                        durations = slow
+                    else:
+                        room = [s - f for s, f in zip(slow, fast)]
+                        extra = max(available - sum(fast), 0.0)
+                        durations = [f + extra * r / sum(room) if sum(room) > 0 else f for f, r in zip(fast, room)]
+                else:
+                    durations = fast
+                times, t = [], free[j]
+                for d in durations:
+                    times.append((t, t + d))
+                    t += d
+
+            t = free[j]
+            for (a, b, _, to_operation), (depart, arrive) in zip(legs[j], times):
+                wait(j, t, depart, zone_of(a))
+                move(j, i if to_operation else -1, a, b, depart, arrive)
+                t = arrive
+            wait(j, t, start, -1)
 
         result.operations.append(Operation(i, kind, ions, zone, start, start + duration, float(np.mean(n_bar[ions]))))
         for j in ions:

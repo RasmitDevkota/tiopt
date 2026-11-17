@@ -49,3 +49,42 @@ def test_waveform_from_a_plan(program):
     assert waveform.times[0] == pytest.approx(min(t.depart for t in plan.transports))
     assert waveform.times[-1] == pytest.approx(max(t.arrive for t in plan.transports))
     assert np.all(np.diff(waveform.times) > 0)
+
+
+def test_moves_back_into_storage_are_planned(program):
+    circuit, graph, transports = program
+    returns = [m for m in transports.moves if m.transport < 0]
+    assert returns
+    timing = scheduling.Timing(max_speed=3e7, min_speed=1e6, heating_rate=200.0, cooling_time=50e-6)
+    plans = scheduling.compare(transports, circuit, graph.positions, graph.zone_types, timing)
+    for mode, plan in plans.items():
+        back = [t for t in plan.transports if t.instruction < 0]
+        # Every move back into storage before an operation is planned, and every ion makes one move at a time
+        assert back, mode
+        for ion in range(transports.n_ions):
+            own = sorted((t for t in plan.transports if t.ion == ion), key=lambda t: t.depart)
+            assert all(b.depart >= a.arrive - 1e-15 for a, b in zip(own, own[1:])), mode
+        # Ions reach the zones of their operations by the time they start
+        starts = {op.instruction: op.start for op in plan.operations}
+        assert all(t.arrive <= starts[t.instruction] + 1e-15 for t in plan.transports if t.instruction >= 0), mode
+    # Just in time, ions go back into storage at once and are cooled there if they have time before their next
+    # operation, and otherwise leave again at once
+    plan = plans["just in time"]
+    after = [[kind for ion, start, _, kind in plan.segments if ion == t.ion and abs(start - t.arrive) < 1e-15]
+             for t in plan.transports if t.instruction < 0]
+    assert all(kinds and kinds[0] in ("cooling", "transport") for kinds in after)
+    assert any(kinds[0] == "cooling" for kinds in after)
+
+
+def test_programs_without_moves_are_planned_as_before(program):
+    circuit, graph, transports = program
+
+    class Program:
+        n_ions = transports.n_ions
+        targets = transports.targets
+        destinations = transports.destinations
+        initial_positions = transports.initial_positions
+
+    plan = scheduling.plan(Program(), circuit, graph.positions, graph.zone_types, mode="eager")
+    assert all(t.instruction >= 0 for t in plan.transports)
+    assert len(plan.transports) < len(scheduling.plan(transports, circuit, graph.positions, graph.zone_types, mode="eager").transports)

@@ -710,6 +710,12 @@ struct TransportProgram* generate_transport_schedule_strategy
     transportProgram->destinations = calloc(transportProgram->n_transports, sizeof(double[3]));
     transportProgram->initial_positions = calloc(transportProgram->n_ions, sizeof(double[3]));
 
+    // Every move is recorded (in a trace of our own if the caller does not want one) so that it can be timed
+    struct ScheduleTrace local_trace = { 0 };
+    if (trace == NULL) {
+        trace = &local_trace;
+    }
+
     // Keeps track of which zone ions are in
     struct ZoneNode **ion_states = malloc(transportProgram->n_ions * sizeof(struct ZoneNode*));
     
@@ -760,6 +766,7 @@ struct TransportProgram* generate_transport_schedule_strategy
 
     if (n_rounds < 0) {
         free(rounds);
+        free_schedule_trace(&local_trace);
         return NULL;
     }
 
@@ -769,17 +776,21 @@ struct TransportProgram* generate_transport_schedule_strategy
         printf("\n");
     }
 
-    schedule_arrival_times_in_rounds(circuitGraph, transportProgram, rounds);
+    free(trace->transport_rounds);
+    trace->n_rounds = n_rounds;
+    trace->transport_rounds = rounds;
 
-    if (trace != NULL) {
-        free(trace->transport_rounds);
-        trace->n_rounds = n_rounds;
-        trace->transport_rounds = rounds;
-    } else {
-        free(rounds);
-    }
+    // Time every move, including the moves back into storage, and the arrival of every transport
+    time_schedule_trace(trapGraph, circuitGraph, transportProgram, trace);
+
+    free_schedule_trace(&local_trace);
 
     return transportProgram;
+}
+
+int default_schedule_strategy(void)
+{
+    return DEFAULT_SCHEDULE_STRATEGY;
 }
 
 // Free the moves of a schedule trace

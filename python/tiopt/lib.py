@@ -217,6 +217,29 @@ class TransportProgramStruct(C.Structure):
     ]
 
 
+class IonMoveStruct(C.Structure):
+    """Mirror of struct IonMove in transport.h."""
+    _fields_ = [
+        ("ion", C.c_int),
+        ("from_zone", C.c_int),
+        ("to_zone", C.c_int),
+        ("transport", C.c_int),
+        ("depart", C.c_double),
+        ("arrive", C.c_double),
+    ]
+
+
+class ScheduleTraceStruct(C.Structure):
+    """Mirror of struct ScheduleTrace in transport.h."""
+    _fields_ = [
+        ("n_moves", C.c_int),
+        ("max_moves", C.c_int),
+        ("moves", C.POINTER(IonMoveStruct)),
+        ("n_rounds", C.c_int),
+        ("transport_rounds", _int_p),
+    ]
+
+
 class PulseProgramStruct(C.Structure):
     """Mirror of struct PulseProgram in data_structures.h."""
     _fields_ = [
@@ -540,6 +563,10 @@ _prototype("generate_linear_trap_graph", None, C.c_int, _int_p, _int_p, _c, _c, 
 _prototype("free_trap_graph", None, C.POINTER(TrapGraphStruct))
 _prototype("free_circuit_graph", None, C.POINTER(CircuitGraphStruct))
 _prototype("free_transport_program", None, C.POINTER(TransportProgramStruct))
+_prototype("generate_transport_schedule_strategy", C.POINTER(TransportProgramStruct), C.POINTER(TrapGraphStruct), C.POINTER(CircuitGraphStruct), C.POINTER(TransportProgramStruct), C.c_int, C.POINTER(ScheduleTraceStruct))
+_prototype("free_schedule_trace", None, C.POINTER(ScheduleTraceStruct))
+_prototype("default_schedule_strategy", C.c_int)
+_prototype("schedule_trace_to_waveform", _waveform_p, _trap_p, _ion_p, C.POINTER(TrapGraphStruct), C.POINTER(TransportProgramStruct), C.POINTER(ScheduleTraceStruct), C.c_int, _c)
 
 # zones.h
 _prototype("parse_zone_types", C.c_int, C.c_char_p, _int_p)
@@ -1550,12 +1577,29 @@ class Waveform:
         return cls(pointer)
 
     @classmethod
-    def from_program(cls, trap, ion, program, n_steps_per_transport=101, omega_axial=AXIAL_FREQUENCY):
-        """Solve for wells for every ion which are moved by each transport of a TransportProgram."""
+    def from_program(cls, trap, ion, program, n_steps_per_move=101, omega_axial=AXIAL_FREQUENCY):
+        """Solve for wells for every ion which follow every move of a TransportProgram, including the moves back into
+        storage between operations, at the times the program gives them, so that moves which overlap in time happen at
+        once.
+
+        Args:
+            trap: Trap whose electrodynamics have been solved.
+            ion: Ion species.
+            program: TransportProgram.
+            n_steps_per_move: Steps of the waveform over each move (moves which share times share steps).
+            omega_axial: Axial secular frequency of every well (rad/s).
+
+        Returns:
+            New waveform
+        """
         trap._require_solved()
-        steps = (C.c_int * program.n_transports)(*([n_steps_per_transport] * program.n_transports))
-        pointer = _lib.transport_program_to_waveform(C.byref(trap.struct), C.byref(ion.struct), program._pointer, steps, omega_axial)
+        pointer = _lib.schedule_trace_to_waveform(
+            C.byref(trap.struct), C.byref(ion.struct), C.byref(program.trap_graph.struct), program._pointer,
+            C.byref(program._trace), int(n_steps_per_move), omega_axial
+        )
         flush_c_output()
+        if not pointer:
+            raise TiOptError("failed to solve for the waveform of the program (no ion moves, or no voltages hold the wells)")
         return cls(pointer)
 
     @classmethod
@@ -2387,24 +2431,61 @@ class TrapGraph:
         return [self.struct.zone_nodes[z].zone_capacity for z in range(self.struct.n_zones)]
 
 
-class TransportProgram:
-    """Transports which bring the ions of a circuit to the zones where their operations happen."""
+# Strategies of the transport scheduler (enum ScheduleStrategy in transport.h)
+SCHEDULE_STRATEGIES = {"baseline": 0, "fast": 1, "rounds": 2, "lookahead": 3, "layer-assign": 4}
 
-    def __init__(self, trap_graph, circuit):
-        """Schedule the transports of a circuit on the zones of a TrapGraph."""
+
+@dataclass
+class ScheduleMove:
+    """Move of an ion (from 1) from one zone of a TrapGraph to another, for a transport of the program (or -1 for a move
+    back into storage between operations), leaving and arriving at the given times (s).
+    """
+    ion: int
+    from_zone: int
+    to_zone: int
+    transport: int
+    depart: float
+    arrive: float
+
+
+class TransportProgram:
+    """Transports which bring the ions of a circuit to the zones where their operations happen, with every move of the
+    ions (including the moves back into storage between operations) and when it happens.
+    """
+
+    def __init__(self, trap_graph, circuit, strategy=None):
+        """Schedule the transports of a circuit on the zones of a TrapGraph.
+
+        Args:
+            trap_graph: TrapGraph of the zones.
+            circuit: Circuit to run.
+            strategy: Strategy of the scheduler (a key of SCHEDULE_STRATEGIES), or None for the default.
+        """
+        if strategy is None:
+            strategy_value = _lib.default_schedule_strategy()
+        elif strategy in SCHEDULE_STRATEGIES:
+            strategy_value = SCHEDULE_STRATEGIES[strategy]
+        else:
+            raise ValueError(f"unknown strategy {strategy!r}; choose from {', '.join(SCHEDULE_STRATEGIES)}")
+        self._pointer = None
+        self._trace = ScheduleTraceStruct()
         memory = _libc.malloc(C.sizeof(TransportProgramStruct))
         C.memset(memory, 0, C.sizeof(TransportProgramStruct))
-        pointer = _lib.generate_transport_schedule(C.byref(trap_graph.struct), circuit._pointer, C.cast(memory, C.POINTER(TransportProgramStruct)))
+        pointer = _lib.generate_transport_schedule_strategy(C.byref(trap_graph.struct), circuit._pointer, C.cast(memory, C.POINTER(TransportProgramStruct)), strategy_value, C.byref(self._trace))
         flush_c_output()
         if not pointer:
             _libc.free(memory)
+            _lib.free_schedule_trace(C.byref(self._trace))
             raise TiOptError("failed to schedule transports (check zone types and capacities)")
         self._pointer = pointer
+        # The zones of the moves belong to the trap graph
+        self.trap_graph = trap_graph
 
     def close(self):
         """Free the memory of the transport program."""
         if self._pointer:
             _lib.free_transport_program(self._pointer)
+            _lib.free_schedule_trace(C.byref(self._trace))
             self._pointer = None
 
     def __del__(self):
@@ -2443,6 +2524,24 @@ class TransportProgram:
         """Ions moved by each transport."""
         program = self._pointer.contents
         return [[program.transport_targets_list[t][i] for i in range(program.transport_n_targets_list[t])] for t in range(self.n_transports)]
+
+    @property
+    def moves(self):
+        """Every move of the ions in order, including the moves back into storage between operations (ScheduleMove)."""
+        return [ScheduleMove(m.ion, m.from_zone, m.to_zone, m.transport, m.depart, m.arrive)
+                for m in (self._trace.moves[k] for k in range(self._trace.n_moves))]
+
+    @property
+    def n_rounds(self):
+        """Number of rounds, where the operations of a round happen at once (a layer of the circuit takes several rounds
+        when its operations do not all fit in the zones at once).
+        """
+        return self._trace.n_rounds
+
+    @property
+    def rounds(self):
+        """Round of each transport (from 1)."""
+        return _from_pointer(self._trace.transport_rounds, self.n_transports).astype(int)
 
 
 # ---------------------------------------------------------------------------------------------------------------------

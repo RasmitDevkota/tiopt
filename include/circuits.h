@@ -54,6 +54,14 @@ void schedule_arrival_times_in_rounds
 	const int *rounds
 );
 
+void time_schedule_trace
+(
+	struct TrapGraph *trap_graph,
+	struct CircuitGraph *circuit_graph,
+	struct TransportProgram *transport_program,
+	struct ScheduleTrace *trace
+);
+
 void generate_linear_trap_graph
 (
 	int n_zones,

@@ -255,6 +255,140 @@ void schedule_arrival_times_in_rounds
 	free(ion_positions);
 }
 
+// Distance between the centers of two zones of a trap graph (µm)
+static double zone_distance
+(
+	struct TrapGraph *trap_graph,
+	int from_zone,
+	int to_zone
+)
+{
+	double *a = trap_graph->zone_nodes[from_zone].position;
+	double *b = trap_graph->zone_nodes[to_zone].position;
+
+	return sqrt(pow(b[0] - a[0], 2) + pow(b[1] - a[1], 2) + pow(b[2] - a[2], 2));
+}
+
+// Time every move of a schedule trace (whose transport_rounds and n_rounds are set) and the arrival time of every
+// transport of its program, at TRANSPORT_SPEED_LIMIT: each round first moves ions back into storage (an ion's moves one
+// after another, different ions at once), then moves the ions of its operations into their zones (all at once, from
+// where they actually are), and then runs its operations, which all start once the slowest transport has arrived and
+// last as long as the slowest one. A move back into storage belongs to the round of the next transport after it in the
+// trace, and those after the last transport happen once the last round is done
+void time_schedule_trace
+(
+	struct TrapGraph *trap_graph,
+	struct CircuitGraph *circuit_graph,
+	struct TransportProgram *transport_program,
+	struct ScheduleTrace *trace
+)
+{
+	int n_ions = transport_program->n_ions;
+	int n_rounds = trace->n_rounds;
+	int *rounds = trace->transport_rounds;
+
+	int n_moves = trace->n_moves;
+	int n_nodes = circuit_graph->n_instruction_nodes;
+
+	// Round of every move
+	int *move_rounds = malloc(MAX(n_moves, 1) * sizeof(int));
+	int next_round = n_rounds + 1;
+	for (int m = n_moves - 1; m >= 0; m--)
+	{
+		if (trace->moves[m].transport >= 0)
+			next_round = rounds[trace->moves[m].transport];
+
+		move_rounds[m] = next_round;
+	}
+
+	// Moves and instructions of each round, in order
+	int *move_starts = calloc(n_rounds + 3, sizeof(int));
+	int *node_starts = calloc(n_rounds + 3, sizeof(int));
+	for (int m = 0; m < n_moves; m++)
+		move_starts[move_rounds[m] + 1]++;
+	for (int i = 0; i < n_nodes; i++)
+		node_starts[rounds[i] + 1]++;
+	for (int r = 1; r <= n_rounds + 2; r++)
+	{
+		move_starts[r] += move_starts[r - 1];
+		node_starts[r] += node_starts[r - 1];
+	}
+
+	int *round_moves = malloc(MAX(n_moves, 1) * sizeof(int));
+	int *round_nodes = malloc(MAX(n_nodes, 1) * sizeof(int));
+	int *next = malloc((n_rounds + 2) * sizeof(int));
+	memcpy(next, move_starts, (n_rounds + 2) * sizeof(int));
+	for (int m = 0; m < n_moves; m++)
+		round_moves[next[move_rounds[m]]++] = m;
+	memcpy(next, node_starts, (n_rounds + 2) * sizeof(int));
+	for (int i = 0; i < n_nodes; i++)
+		round_nodes[next[rounds[i]]++] = i;
+
+	// When each ion is free to make its next move back into storage in the round it last moved in
+	double *ion_times = malloc(MAX(n_ions, 1) * sizeof(double));
+	int *ion_rounds = calloc(MAX(n_ions, 1), sizeof(int));
+
+	double time = 0.0;
+	for (int round = 1; round <= n_rounds + 1; round++)
+	{
+		// Moves back into storage
+		double transport_start = time;
+		for (int k = move_starts[round]; k < move_starts[round + 1]; k++)
+		{
+			struct IonMove *move = &trace->moves[round_moves[k]];
+			if (move->transport >= 0)
+				continue;
+
+			int ion = move->ion - 1;
+			if (ion_rounds[ion] != round)
+			{
+				ion_rounds[ion] = round;
+				ion_times[ion] = time;
+			}
+
+			move->depart = ion_times[ion];
+			move->arrive = move->depart + zone_distance(trap_graph, move->from_zone, move->to_zone) / TRANSPORT_SPEED_LIMIT;
+			ion_times[ion] = move->arrive;
+			transport_start = MAX(transport_start, move->arrive);
+		}
+
+		// Moves into the zones of the operations
+		double max_transport = 0.0;
+		for (int k = move_starts[round]; k < move_starts[round + 1]; k++)
+		{
+			struct IonMove *move = &trace->moves[round_moves[k]];
+			if (move->transport < 0)
+				continue;
+
+			double duration = zone_distance(trap_graph, move->from_zone, move->to_zone) / TRANSPORT_SPEED_LIMIT;
+			move->depart = transport_start;
+			move->arrive = transport_start + duration;
+			max_transport = MAX(max_transport, duration);
+		}
+
+		// Operations
+		double max_duration = 0.0;
+		for (int k = node_starts[round]; k < node_starts[round + 1]; k++)
+		{
+			int i = round_nodes[k];
+
+			transport_program->arrival_times[i] = transport_start + max_transport;
+			max_duration = MAX(max_duration, operation_duration(&circuit_graph->instruction_nodes[i]));
+		}
+
+		time = transport_start + max_transport + max_duration;
+	}
+
+	free(ion_rounds);
+	free(ion_times);
+	free(next);
+	free(round_nodes);
+	free(round_moves);
+	free(node_starts);
+	free(move_starts);
+	free(move_rounds);
+}
+
 // Generate a trap graph of zones evenly spaced along the trap axis at the given height, connected in a line
 void generate_linear_trap_graph
 (
@@ -438,7 +572,7 @@ void record_ion_move
 		trace->moves = realloc(trace->moves, trace->max_moves * sizeof(struct IonMove));
 	}
 
-	trace->moves[trace->n_moves++] = (struct IonMove) { ion, (int) (from - trap_graph->zone_nodes), (int) (to - trap_graph->zone_nodes), transport };
+	trace->moves[trace->n_moves++] = (struct IonMove) { ion, (int) (from - trap_graph->zone_nodes), (int) (to - trap_graph->zone_nodes), transport, 0.0, 0.0 };
 }
 
 // As release_operation_zones, but leaving the ions for which keep is set (if keep is not NULL) where they are, and

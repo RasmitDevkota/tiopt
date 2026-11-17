@@ -26,6 +26,8 @@ struct IonMove
     int from_zone;
     int to_zone;
     int transport; // index of the transport which moves the ion, or -1 for a move back into storage between operations
+    double depart; // time at which the ion leaves from_zone (s)
+    double arrive; // time at which the ion reaches to_zone (s)
 };
 
 // Every move of the ions made by a schedule, in order, including the moves back into storage which the transport
@@ -58,6 +60,9 @@ struct TransportProgram* generate_transport_schedule_strategy
 );
 
 void free_schedule_trace(struct ScheduleTrace *trace);
+
+// Strategy which generate_transport_schedule uses
+int default_schedule_strategy(void);
 
 struct TransportProgram* simple_transport_schedule ();
 
