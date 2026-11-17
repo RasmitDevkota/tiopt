@@ -238,10 +238,12 @@ def plan(program, circuit, zone_positions, zone_types, timing=None, mode="eager"
             else:
                 returns[m.transport, m.ion - 1] = since.pop(m.ion - 1, [])
 
-    # Operations in the order of the circuit, or in the order the schedule runs them when commuting operations were moved
-    # into other layers (and so the order of the circuit is no longer the order of each ion's operations)
-    if getattr(program, "commute", False):
-        order = np.argsort(program.rounds, kind="stable")
+    # Operations in the order the schedule runs them (by round, and in the order of the circuit within a round), so that
+    # an operation of a later round never takes a zone before one of an earlier round; programs without rounds are
+    # planned in the order of the circuit
+    rounds = getattr(program, "rounds", None)
+    if rounds is not None:
+        order = np.argsort(rounds, kind="stable")
     else:
         order = range(len(program.targets))
     all_targets, all_destinations = program.targets, program.destinations
