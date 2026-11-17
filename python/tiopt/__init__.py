@@ -16,6 +16,7 @@ from .lib import (
     LENGTH_SCALE,
     TRANSPORT_SPEED_LIMIT,
     SCHEDULE_STRATEGIES,
+    DEFAULT_LOOKAHEAD_LAYERS,
     ScheduleMove,
     Circuit,
     Grating,

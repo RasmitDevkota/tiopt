@@ -240,6 +240,14 @@ class ScheduleTraceStruct(C.Structure):
     ]
 
 
+class ScheduleOptionsStruct(C.Structure):
+    """Mirror of struct ScheduleOptions in transport.h."""
+    _fields_ = [
+        ("strategy", C.c_int),
+        ("lookahead_layers", C.c_int),
+    ]
+
+
 class PulseProgramStruct(C.Structure):
     """Mirror of struct PulseProgram in data_structures.h."""
     _fields_ = [
@@ -565,6 +573,7 @@ _prototype("free_circuit_graph", None, C.POINTER(CircuitGraphStruct))
 _prototype("free_transport_program", None, C.POINTER(TransportProgramStruct))
 _prototype("generate_transport_schedule_strategy", C.POINTER(TransportProgramStruct), C.POINTER(TrapGraphStruct), C.POINTER(CircuitGraphStruct), C.POINTER(TransportProgramStruct), C.c_int, C.POINTER(ScheduleTraceStruct))
 _prototype("free_schedule_trace", None, C.POINTER(ScheduleTraceStruct))
+_prototype("generate_transport_schedule_options", C.POINTER(TransportProgramStruct), C.POINTER(TrapGraphStruct), C.POINTER(CircuitGraphStruct), C.POINTER(TransportProgramStruct), C.POINTER(ScheduleOptionsStruct), C.POINTER(ScheduleTraceStruct))
 _prototype("default_schedule_strategy", C.c_int)
 _prototype("schedule_trace_to_waveform", _waveform_p, _trap_p, _ion_p, C.POINTER(TrapGraphStruct), C.POINTER(TransportProgramStruct), C.POINTER(ScheduleTraceStruct), C.c_int, _c)
 
@@ -2434,6 +2443,9 @@ class TrapGraph:
 # Strategies of the transport scheduler (enum ScheduleStrategy in transport.h)
 SCHEDULE_STRATEGIES = {"baseline": 0, "fast": 1, "rounds": 2, "lookahead": 3, "layer-assign": 4}
 
+# Layers ahead which the lookahead strategies look for the next operation of an ion by default
+DEFAULT_LOOKAHEAD_LAYERS = int(constant("DEFAULT_LOOKAHEAD_LAYERS"))
+
 
 @dataclass
 class ScheduleMove:
@@ -2453,13 +2465,16 @@ class TransportProgram:
     ions (including the moves back into storage between operations) and when it happens.
     """
 
-    def __init__(self, trap_graph, circuit, strategy=None):
+    def __init__(self, trap_graph, circuit, strategy=None, lookahead_layers=None):
         """Schedule the transports of a circuit on the zones of a TrapGraph.
 
         Args:
             trap_graph: TrapGraph of the zones.
             circuit: Circuit to run.
             strategy: Strategy of the scheduler (a key of SCHEDULE_STRATEGIES), or None for the default.
+            lookahead_layers: With the lookahead and layer-assign strategies, an ion stays in its zone after a layer if
+                its next operation is at most this many layers later and can happen there (at least 1, and
+                DEFAULT_LOOKAHEAD_LAYERS if None).
         """
         if strategy is None:
             strategy_value = _lib.default_schedule_strategy()
@@ -2467,11 +2482,13 @@ class TransportProgram:
             strategy_value = SCHEDULE_STRATEGIES[strategy]
         else:
             raise ValueError(f"unknown strategy {strategy!r}; choose from {', '.join(SCHEDULE_STRATEGIES)}")
+        self.lookahead_layers = max(int(DEFAULT_LOOKAHEAD_LAYERS if lookahead_layers is None else lookahead_layers), 1)
+        options = ScheduleOptionsStruct(strategy_value, self.lookahead_layers)
         self._pointer = None
         self._trace = ScheduleTraceStruct()
         memory = _libc.malloc(C.sizeof(TransportProgramStruct))
         C.memset(memory, 0, C.sizeof(TransportProgramStruct))
-        pointer = _lib.generate_transport_schedule_strategy(C.byref(trap_graph.struct), circuit._pointer, C.cast(memory, C.POINTER(TransportProgramStruct)), strategy_value, C.byref(self._trace))
+        pointer = _lib.generate_transport_schedule_options(C.byref(trap_graph.struct), circuit._pointer, C.cast(memory, C.POINTER(TransportProgramStruct)), C.byref(options), C.byref(self._trace))
         flush_c_output()
         if not pointer:
             _libc.free(memory)

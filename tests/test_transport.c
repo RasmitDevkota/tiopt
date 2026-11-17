@@ -29,6 +29,7 @@ int test_all_transport
 	result += test_fast_schedule_matches_baseline(atol);
 	result += test_schedule_rounds_fit_zones(atol);
 	result += test_schedule_trace_times(atol);
+	result += test_lookahead_layers(atol);
 
 	return result;
 }
@@ -291,6 +292,57 @@ int test_fast_schedule_matches_baseline
 	return check_error("SCHEDULE_FAST makes the same schedule as SCHEDULE_BASELINE", n_wrong, 0);
 }
 
+// Follow the ions of a schedule which starts with every ion in the first zone, checking each round once all of its
+// transports are done: every operation must find its ions at its destination, and no zone may be over capacity. Returns
+// the number of problems found
+static int count_invalid
+(
+	struct TrapGraph *trap_graph,
+	struct CircuitGraph *circuit_graph,
+	struct TransportProgram *program,
+	struct ScheduleTrace *trace,
+	double atol
+)
+{
+	int n_wrong = 0;
+	int n_ions = circuit_graph->n_ions;
+	int *ion_zones = calloc(n_ions, sizeof(int));
+	int *occupancy = calloc(trap_graph->n_zones, sizeof(int));
+	occupancy[0] = n_ions;
+
+	for (int m = 0; m < trace->n_moves; m++)
+	{
+		struct IonMove *move = &trace->moves[m];
+		ion_zones[move->ion - 1] = move->to_zone;
+		occupancy[move->from_zone]--;
+		occupancy[move->to_zone]++;
+
+		int last = (move->transport >= 0) && (m + 1 == trace->n_moves || trace->moves[m + 1].transport < 0 ||
+			trace->transport_rounds[trace->moves[m + 1].transport] != trace->transport_rounds[move->transport]);
+		if (!last)
+			continue;
+
+		int round = trace->transport_rounds[move->transport];
+		for (int t = 0; t < program->n_transports; t++)
+		{
+			if (trace->transport_rounds[t] != round)
+				continue;
+
+			struct InstructionNode *node = &circuit_graph->instruction_nodes[t];
+			for (int i = 0; i < node->n_target_ions; i++)
+				n_wrong += (fabs(trap_graph->zone_nodes[ion_zones[node->target_ions[i] - 1]].position[0] - program->destinations[t][0]) > atol);
+		}
+
+		for (int z = 0; z < trap_graph->n_zones; z++)
+			n_wrong += (occupancy[z] > trap_graph->zone_nodes[z].zone_capacity);
+	}
+
+	free(occupancy);
+	free(ion_zones);
+
+	return n_wrong;
+}
+
 int test_schedule_rounds_fit_zones
 (
 	double atol
@@ -322,41 +374,7 @@ int test_schedule_rounds_fit_zones
 		{
 			n_wrong += (trace.transport_rounds[0] != 1) + (trace.transport_rounds[3] != 2);
 
-			// Follow the ions, checking each round once all of its transports are done
-			int n_ions = circuit_graph->n_ions;
-			int *ion_zones = calloc(n_ions, sizeof(int));
-			int *occupancy = calloc(trap_graph.n_zones, sizeof(int));
-			occupancy[0] = n_ions;
-
-			for (int m = 0; m < trace.n_moves; m++)
-			{
-				struct IonMove *move = &trace.moves[m];
-				ion_zones[move->ion - 1] = move->to_zone;
-				occupancy[move->from_zone]--;
-				occupancy[move->to_zone]++;
-
-				int last = (move->transport >= 0) && (m + 1 == trace.n_moves || trace.moves[m + 1].transport < 0 ||
-					trace.transport_rounds[trace.moves[m + 1].transport] != trace.transport_rounds[move->transport]);
-				if (!last)
-					continue;
-
-				int round = trace.transport_rounds[move->transport];
-				for (int t = 0; t < program->n_transports; t++)
-				{
-					if (trace.transport_rounds[t] != round)
-						continue;
-
-					struct InstructionNode *node = &circuit_graph->instruction_nodes[t];
-					for (int i = 0; i < node->n_target_ions; i++)
-						n_wrong += (fabs(trap_graph.zone_nodes[ion_zones[node->target_ions[i] - 1]].position[0] - program->destinations[t][0]) > atol);
-				}
-
-				for (int z = 0; z < trap_graph.n_zones; z++)
-					n_wrong += (occupancy[z] > trap_graph.zone_nodes[z].zone_capacity);
-			}
-
-			free(occupancy);
-			free(ion_zones);
+			n_wrong += count_invalid(&trap_graph, circuit_graph, program, &trace, atol);
 		}
 
 		free_schedule_trace(&trace);
@@ -475,4 +493,111 @@ int test_schedule_trace_times
 	free_trap_graph(&trap_graph);
 
 	return check_error("time_schedule_trace times every move", n_wrong, 0);
+}
+
+// Whether two schedules are exactly the same
+static int same_schedule
+(
+	struct TransportProgram *a,
+	struct ScheduleTrace *trace_a,
+	struct TransportProgram *b,
+	struct ScheduleTrace *trace_b
+)
+{
+	if (a->n_transports != b->n_transports || trace_a->n_moves != trace_b->n_moves || trace_a->n_rounds != trace_b->n_rounds)
+		return 0;
+
+	return memcmp(trace_a->transport_rounds, trace_b->transport_rounds, a->n_transports * sizeof(int)) == 0 &&
+		memcmp(a->arrival_times, b->arrival_times, a->n_transports * sizeof(double)) == 0 &&
+		memcmp(a->destinations, b->destinations, a->n_transports * sizeof(double[3])) == 0 &&
+		memcmp(trace_a->moves, trace_b->moves, trace_a->n_moves * sizeof(struct IonMove)) == 0;
+}
+
+int test_lookahead_layers
+(
+	double atol
+)
+{
+	// Load and storage, two gate zones which hold four ions, and a measure zone; in the circuit, qubit 1 waits for one
+	// layer between its two gates with qubit 2
+	enum ZoneType zone_types[4] = { LOAD_ZONE | STORAGE_ZONE, GATE_ZONE, GATE_ZONE, MEASURE_ZONE };
+	int zone_capacities[4] = { 4, 4, 4, 4 };
+
+	const char *circuits[2] = { "quantumcircuits/lookahead_gap.qasm", "quantumcircuits/test_0000.qasm" };
+	enum ScheduleStrategy strategies[2] = { SCHEDULE_LOOKAHEAD, SCHEDULE_LAYER_ASSIGN };
+	int n_wrong = 0;
+
+	for (int c = 0; c < 2; c++)
+	{
+		struct CircuitGraph *circuit_graph = parse_qasm(circuits[c]);
+
+		for (int s = 0; s < 2; s++)
+		{
+			struct TransportProgram *programs[4];
+			struct ScheduleTrace traces[4];
+			int scheduled = 1;
+
+			// With the strategy alone, and looking 1 (as by default), 2, and 0 (which is taken as 1) layers ahead
+			int depths[4] = { 1, 1, 2, 0 };
+			for (int k = 0; k < 4; k++)
+			{
+				struct TrapGraph trap_graph;
+				generate_linear_trap_graph(4, zone_types, zone_capacities, 0.0, 300.0, ION_HEIGHT, &trap_graph);
+
+				struct ScheduleOptions options = { strategies[s], depths[k] };
+				programs[k] = calloc(1, sizeof(struct TransportProgram));
+				traces[k] = (struct ScheduleTrace) { 0 };
+
+				struct TransportProgram *result = (k == 0)
+					? generate_transport_schedule_strategy(&trap_graph, circuit_graph, programs[k], strategies[s], &traces[k])
+					: generate_transport_schedule_options(&trap_graph, circuit_graph, programs[k], &options, &traces[k]);
+
+				if (result == NULL)
+				{
+					n_wrong += 100;
+					scheduled = 0;
+				}
+				else
+					n_wrong += count_invalid(&trap_graph, circuit_graph, programs[k], &traces[k], atol);
+
+				free_trap_graph(&trap_graph);
+			}
+
+			if (scheduled)
+			{
+				n_wrong += !same_schedule(programs[0], &traces[0], programs[1], &traces[1]);
+				n_wrong += !same_schedule(programs[0], &traces[0], programs[3], &traces[3]);
+			}
+
+			// Looking 1 layer ahead, qubit 1 goes back into storage between its gates, and looking 2 layers ahead it
+			// stays in the gate zone
+			if (c == 0 && scheduled)
+			{
+				for (int k = 1; k <= 2; k++)
+				{
+					int n_back = 0;
+					for (int m = 0; m < traces[k].n_moves; m++)
+					{
+						struct IonMove *move = &traces[k].moves[m];
+						n_back += (move->ion == 1 && move->transport < 0 && move->arrive <= programs[k]->arrival_times[2]);
+					}
+					n_wrong += (k == 1) ? (n_back == 0) : (n_back != 0);
+				}
+
+				// So the last gate starts sooner
+				n_wrong += (programs[2]->arrival_times[2] >= programs[1]->arrival_times[2]);
+			}
+
+			for (int k = 0; k < 4; k++)
+			{
+				free_schedule_trace(&traces[k]);
+				if (scheduled)
+					free_transport_program(programs[k]);
+			}
+		}
+
+		free_circuit_graph(circuit_graph);
+	}
+
+	return check_error("lookahead_layers keeps ions for operations further ahead", n_wrong, 0);
 }

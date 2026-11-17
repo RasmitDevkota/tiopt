@@ -102,3 +102,51 @@ def test_program_times_every_move(circuit):
         assert all(b.depart >= a.arrive - 1e-12 for a, b in zip(own, own[1:]))
     with pytest.raises(ValueError):
         tiopt.TransportProgram(trap_graph, circuit, "unknown")
+
+
+def _replay_is_valid(program, trap_graph, circuit):
+    """Whether every operation finds its ions in its zone once its round has arrived, with no zone over capacity."""
+    capacities = trap_graph.capacities
+    zones = {ion: 0 for ion in range(1, program.n_ions + 1)}
+    rounds = program.rounds
+    moves = program.moves
+    for k, move in enumerate(moves):
+        zones[move.ion] = move.to_zone
+        if move.transport < 0:
+            continue
+        later = moves[k + 1] if k + 1 < len(moves) else None
+        if later is not None and later.transport >= 0 and rounds[later.transport] == rounds[move.transport]:
+            continue
+        occupancy = np.bincount(list(zones.values()), minlength=len(capacities))
+        if np.any(occupancy > capacities):
+            return False
+        for t in np.flatnonzero(rounds == rounds[move.transport]):
+            for ion in circuit.instructions[t].targets:
+                if trap_graph.positions[zones[ion], 0] != pytest.approx(program.destinations[t, 0]):
+                    return False
+    return True
+
+
+@pytest.mark.parametrize("strategy", ["lookahead", "layer-assign"])
+def test_lookahead_layers(repository, strategy):
+    circuit = tiopt.Circuit(repository / "tests" / "quantumcircuits" / "lookahead_gap.qasm")
+    def program(**kwargs):
+        graph = tiopt.TrapGraph(["load+storage", "gate", "gate", "measure"], [4, 4, 4, 4], 0.0, 300.0)
+        return graph, tiopt.TransportProgram(graph, circuit, strategy, **kwargs)
+
+    default = program()[1]
+    assert default.lookahead_layers == tiopt.DEFAULT_LOOKAHEAD_LAYERS == 1
+    for kwargs in ({"lookahead_layers": 1}, {"lookahead_layers": 0}):
+        same = program(**kwargs)[1]
+        assert same.lookahead_layers == 1
+        assert same.moves == default.moves
+        np.testing.assert_array_equal(same.arrival_times, default.arrival_times)
+
+    # Looking further ahead, qubit 1 waits in the gate zone through the layer it is not used in, instead of going back
+    # into storage, and the schedule stays valid
+    for depth, goes_back in ((1, True), (3, False)):
+        graph, scheduled = program(lookahead_layers=depth)
+        assert scheduled.lookahead_layers == depth
+        assert _replay_is_valid(scheduled, graph, circuit)
+        back = [m for m in scheduled.moves if m.ion == 1 and m.transport < 0 and m.arrive <= scheduled.arrival_times[2]]
+        assert bool(back) == goes_back

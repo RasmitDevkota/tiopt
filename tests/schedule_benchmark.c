@@ -22,9 +22,18 @@
 #define MAX_RUNS 1000
 #define MIN_TIME 0.2 // shortest time spent timing each strategy (s)
 
-static const char *strategy_names[] = { "baseline", "fast", "rounds", "lookahead", "layer-assign" };
-static const enum ScheduleStrategy strategies[] = { SCHEDULE_BASELINE, SCHEDULE_FAST, SCHEDULE_ROUNDS, SCHEDULE_LOOKAHEAD, SCHEDULE_LAYER_ASSIGN };
-#define N_STRATEGIES 5
+// Strategies compared, where the first two must give the same schedule, and the lookahead strategies are also run looking
+// further ahead than the next layer
+static const char *strategy_names[] = {
+	"baseline", "fast", "rounds", "lookahead", "layer-assign",
+	"lookahead-2", "lookahead-3", "lookahead-6", "layer-assign-2", "layer-assign-3", "layer-assign-6",
+};
+static const struct ScheduleOptions strategies[] = {
+	{ SCHEDULE_BASELINE, 1 }, { SCHEDULE_FAST, 1 }, { SCHEDULE_ROUNDS, 1 }, { SCHEDULE_LOOKAHEAD, 1 }, { SCHEDULE_LAYER_ASSIGN, 1 },
+	{ SCHEDULE_LOOKAHEAD, 2 }, { SCHEDULE_LOOKAHEAD, 3 }, { SCHEDULE_LOOKAHEAD, 6 },
+	{ SCHEDULE_LAYER_ASSIGN, 2 }, { SCHEDULE_LAYER_ASSIGN, 3 }, { SCHEDULE_LAYER_ASSIGN, 6 },
+};
+#define N_STRATEGIES 11
 
 // Every circuit in this directory, made by quantumcircuits/generate_benchmark_circuits.py
 #define CIRCUIT_DIR "quantumcircuits/benchmarks"
@@ -291,7 +300,7 @@ static struct TransportProgram* run_schedule
 (
 	struct TrapGraph *trap_graph,
 	struct CircuitGraph *circuit_graph,
-	enum ScheduleStrategy strategy,
+	const struct ScheduleOptions *options,
 	struct ScheduleTrace *trace
 )
 {
@@ -301,7 +310,7 @@ static struct TransportProgram* run_schedule
 	struct TransportProgram *transport_program = calloc(1, sizeof(struct TransportProgram));
 
 	silence_stdout(1);
-	struct TransportProgram *result = generate_transport_schedule_strategy(trap_graph, circuit_graph, transport_program, strategy, trace);
+	struct TransportProgram *result = generate_transport_schedule_options(trap_graph, circuit_graph, transport_program, options, trace);
 	silence_stdout(0);
 
 	if (result == NULL)
@@ -336,7 +345,7 @@ int main
 		return 1;
 	}
 
-	printf("%-20s %-42s %-13s %7s %7s %12s %13s %7s %12s\n", "circuit", "layout", "strategy", "valid", "rounds", "makespan(us)", "distance(um)", "moves", "time(us)");
+	printf("%-20s %-42s %-15s %7s %7s %12s %13s %7s %12s\n", "circuit", "layout", "strategy", "valid", "rounds", "makespan(us)", "distance(um)", "moves", "time(us)");
 
 	for (int c = 0; c < n_entries; c++)
 	{
@@ -376,7 +385,7 @@ int main
 			for (int s = 0; s < N_STRATEGIES; s++)
 			{
 				traces[s] = (struct ScheduleTrace) { 0 };
-				programs[s] = run_schedule(&trap_graph, circuit_graph, strategies[s], &traces[s]);
+				programs[s] = run_schedule(&trap_graph, circuit_graph, &strategies[s], &traces[s]);
 
 				struct ScheduleResult *result = &results[s];
 				memset(result, 0, sizeof(*result));
@@ -412,7 +421,7 @@ int main
 
 					silence_stdout(1);
 					double t0 = wall_time();
-					generate_transport_schedule_strategy(&trap_graph, circuit_graph, transport_program, strategies[s], NULL);
+					generate_transport_schedule_options(&trap_graph, circuit_graph, transport_program, &strategies[s], NULL);
 					run_times[n_runs++] = wall_time() - t0;
 					silence_stdout(0);
 
@@ -424,7 +433,7 @@ int main
 
 				int valid = result->scheduled && result->n_invalid == 0;
 				int n_rounds = (programs[s] != NULL) ? traces[s].n_rounds : 0;
-				printf("%-20s %-42s %-13s %7s %7d %12.2f %13.0f %7d %12.2f\n", circuit_name, layouts[l], strategy_names[s],
+				printf("%-20s %-42s %-15s %7s %7d %12.2f %13.0f %7d %12.2f\n", circuit_name, layouts[l], strategy_names[s],
 					!result->scheduled ? "fail" : valid ? "yes" : "NO", n_rounds, 1E6 * result->makespan, result->distance, result->n_moves, 1E6 * result->run_time);
 
 				if (csv != NULL)
@@ -439,14 +448,15 @@ int main
 				n_mismatches++;
 			}
 
-			// The other strategies must always make valid schedules, and layer-assign must make them no longer than the
-			// rounds alone do (lookahead places operations greedily, so it sometimes makes them a little longer)
+			// The other strategies must always make valid schedules, and layer-assign (looking one layer ahead) must make
+			// them no longer than the rounds alone do (lookahead places operations greedily, so it sometimes makes them a
+			// little longer, and looking further ahead can keep ions in zones which other operations need)
 			for (int s = 2; s < N_STRATEGIES; s++)
 			{
 				int valid = results[s].scheduled && results[s].n_invalid == 0;
 				int slower = valid && s > 2 && results[s].makespan > results[2].makespan * (1.0 + 1E-12);
 
-				if (!valid || (slower && strategies[s] == SCHEDULE_LAYER_ASSIGN))
+				if (!valid || (slower && strategies[s].strategy == SCHEDULE_LAYER_ASSIGN && strategies[s].lookahead_layers == 1))
 				{
 					printf("  WORSE: %s is %s\n", strategy_names[s], valid ? "slower than rounds" : "invalid");
 					n_worse++;

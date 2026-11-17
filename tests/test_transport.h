@@ -49,3 +49,8 @@ int test_schedule_trace_times
 (
 	double atol
 );
+
+int test_lookahead_layers
+(
+	double atol
+);

@@ -366,9 +366,9 @@ static int assign_layer_zones
 
 // Scheduler which visits the instructions of each layer through the circuit sorted by layer; with SCHEDULE_FAST it gives
 // the same schedule as schedule_baseline, while the other strategies split each layer into rounds which fit in the
-// zones, SCHEDULE_LOOKAHEAD and SCHEDULE_LAYER_ASSIGN leave ions in their zone for an operation in the next layer, and
-// SCHEDULE_LAYER_ASSIGN also assigns the zones of each round together. Sets the round of each instruction, and returns
-// the number of rounds, or -1 if the circuit cannot be scheduled
+// zones, SCHEDULE_LOOKAHEAD and SCHEDULE_LAYER_ASSIGN leave ions in their zone for an operation at most lookahead_layers
+// layers later, and SCHEDULE_LAYER_ASSIGN also assigns the zones of each round together. Sets the round of each
+// instruction, and returns the number of rounds, or -1 if the circuit cannot be scheduled
 static int schedule_sorted
 (
     struct TrapGraph *trapGraph,
@@ -376,6 +376,7 @@ static int schedule_sorted
     struct TransportProgram *transportProgram,
     struct ZoneNode **ion_states,
     enum ScheduleStrategy strategy,
+    int lookahead_layers,
     int *rounds,
     struct ScheduleTrace *trace
 )
@@ -411,6 +412,7 @@ static int schedule_sorted
 
     int *keep = calloc(n_ions, sizeof(int));
     int *next_ops = malloc(n_ions * sizeof(int));
+    int *candidates = malloc(MAX(n_ions, 1) * sizeof(int));
     int *zone_reserved = malloc(MAX(trapGraph->n_zones, 1) * sizeof(int));
     int *pending = malloc(MAX(n_nodes, 1) * sizeof(int));
     int *round_ops = malloc(MAX(n_nodes, 1) * sizeof(int));
@@ -609,12 +611,15 @@ static int schedule_sorted
         }
 
         // Move ions to storage/empty zones once the layer is done, except (when looking ahead) the ions whose next
-        // operation is in the next layer and can happen in the zone they are in
+        // operation is at most lookahead_layers layers later and can happen in the zone they are in
         memset(keep, 0, n_ions * sizeof(int));
 
         if (strategy == SCHEDULE_LOOKAHEAD || strategy == SCHEDULE_LAYER_ASSIGN) {
             memset(zone_reserved, 0, trapGraph->n_zones * sizeof(int));
 
+            // Ions which could stay, in order of the layer of their next operation (and then by ion), so that the
+            // operations which come soonest get the room in each zone first
+            int n_candidates = 0;
             for (int ion = 0; ion < n_ions; ion++) {
                 while (ion_next[ion] < ion_op_starts[ion + 1] && circuitGraph->layer_idxs[ion_ops[ion_next[ion]]] <= layer) {
                     ion_next[ion]++;
@@ -627,17 +632,30 @@ static int schedule_sorted
 
                 int next = ion_ops[ion_next[ion]];
                 struct InstructionNode *instr = &circuitGraph->instruction_nodes[next];
-                if (circuitGraph->layer_idxs[next] != layer + 1 || !(ion_states[ion]->zone_type & operation_zone_type(instr))) {
+                if (circuitGraph->layer_idxs[next] > layer + lookahead_layers || !(ion_states[ion]->zone_type & operation_zone_type(instr))) {
                     continue;
                 }
 
                 next_ops[ion] = next;
 
+                int c = n_candidates++;
+                while (c > 0 && circuitGraph->layer_idxs[next_ops[candidates[c - 1]]] > circuitGraph->layer_idxs[next]) {
+                    candidates[c] = candidates[c - 1];
+                    c--;
+                }
+                candidates[c] = ion;
+            }
+
+            for (int c = 0; c < n_candidates; c++) {
+                int ion = candidates[c];
+                int next = next_ops[ion];
+                struct InstructionNode *instr = &circuitGraph->instruction_nodes[next];
+
                 // Only as many ions stay in a zone as leave room for every ion of their next operations, so that the
                 // ions they wait for can join them
                 int shared = 0;
-                for (int other = 0; other < ion; other++) {
-                    shared |= keep[other] && ion_states[other] == ion_states[ion] && next_ops[other] == next;
+                for (int other = 0; other < c; other++) {
+                    shared |= keep[candidates[other]] && ion_states[candidates[other]] == ion_states[ion] && next_ops[candidates[other]] == next;
                 }
 
                 int z = ion_states[ion] - trapGraph->zone_nodes;
@@ -658,6 +676,7 @@ static int schedule_sorted
     free(round_ops);
     free(pending);
     free(zone_reserved);
+    free(candidates);
     free(next_ops);
     free(keep);
     free(ion_next);
@@ -691,6 +710,25 @@ struct TransportProgram* generate_transport_schedule_strategy
     struct ScheduleTrace *trace
 )
 {
+    struct ScheduleOptions options = { strategy, DEFAULT_LOOKAHEAD_LAYERS };
+
+    return generate_transport_schedule_options(trapGraph, circuitGraph, transportProgram, &options, trace);
+}
+
+// Generates transport schedule given circuit data and trap data with the given options, recording every move of the ions
+// in trace if it is not NULL
+struct TransportProgram* generate_transport_schedule_options
+(
+    struct TrapGraph *trapGraph,
+    struct CircuitGraph *circuitGraph,
+    struct TransportProgram* transportProgram,
+    const struct ScheduleOptions *options,
+    struct ScheduleTrace *trace
+)
+{
+    enum ScheduleStrategy strategy = options->strategy;
+    int lookahead_layers = MAX(options->lookahead_layers, 1);
+
     // circuitGraph->n_ions must be initialized
     if (circuitGraph->n_ions <= 0) {
         printf("ERROR: Number of ions in circuit graph must be initialized.\n");
@@ -759,7 +797,7 @@ struct TransportProgram* generate_transport_schedule_strategy
     if (strategy == SCHEDULE_BASELINE) {
         n_rounds = (schedule_baseline(trapGraph, circuitGraph, transportProgram, ion_states, max_layer, rounds, trace) == 0) ? max_layer : -1;
     } else {
-        n_rounds = schedule_sorted(trapGraph, circuitGraph, transportProgram, ion_states, strategy, rounds, trace);
+        n_rounds = schedule_sorted(trapGraph, circuitGraph, transportProgram, ion_states, strategy, lookahead_layers, rounds, trace);
     }
 
     free(ion_states);
