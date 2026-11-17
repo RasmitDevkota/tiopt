@@ -88,3 +88,21 @@ def test_programs_without_moves_are_planned_as_before(program):
     plan = scheduling.plan(Program(), circuit, graph.positions, graph.zone_types, mode="eager")
     assert all(t.instruction >= 0 for t in plan.transports)
     assert len(plan.transports) < len(scheduling.plan(transports, circuit, graph.positions, graph.zone_types, mode="eager").transports)
+
+
+def test_plans_with_commuting_operations_moved(repository):
+    circuit = tiopt.Circuit(repository / "tests" / "quantumcircuits" / "benchmarks" / "qaoa_06.qasm")
+    graph = tiopt.TrapGraph.from_layout("load, storage x2, gate x5, measure", 100.0, circuit.n_ions)
+    transports = tiopt.TransportProgram(graph, circuit, "layer-assign", commute=True)
+    plans = scheduling.compare(transports, circuit, graph.positions, graph.zone_types)
+    starts = {mode: {op.instruction: op.start for op in plan.operations} for mode, plan in plans.items()}
+    assert starts["eager"] == pytest.approx(starts["just in time"])
+    assert starts["eager"] == pytest.approx(starts["as soon as possible"])
+    # Each ion's operations start in the order of their rounds, which is not the order of the circuit
+    for ion in range(1, circuit.n_ions + 1):
+        own = [i for i, instruction in enumerate(circuit.instructions) if ion in instruction.targets]
+        by_round = sorted(own, key=lambda i: transports.rounds[i])
+        times = [starts["eager"][i] for i in by_round]
+        assert all(b > a for a, b in zip(times, times[1:]))
+    assert any(transports.rounds[i] > transports.rounds[j] for i in range(len(circuit.instructions))
+               for j in range(i + 1, len(circuit.instructions)))

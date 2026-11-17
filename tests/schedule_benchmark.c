@@ -22,18 +22,22 @@
 #define MAX_RUNS 1000
 #define MIN_TIME 0.2 // shortest time spent timing each strategy (s)
 
-// Strategies compared, where the first two must give the same schedule, and the lookahead strategies are also run looking
-// further ahead than the next layer
+// Strategies compared, where the first two must give the same schedule, the lookahead strategies are also run looking
+// further ahead than the next layer, and some strategies are also run with commuting (diagonal) operations moved into
+// fewer layers, which are compared with the same strategy without (their base)
 static const char *strategy_names[] = {
 	"baseline", "fast", "rounds", "lookahead", "layer-assign",
 	"lookahead-2", "lookahead-3", "lookahead-6", "layer-assign-2", "layer-assign-3", "layer-assign-6",
+	"rounds-commute", "layer-assign-commute", "layer-assign-2-commute",
 };
 static const struct ScheduleOptions strategies[] = {
 	{ SCHEDULE_BASELINE, 1 }, { SCHEDULE_FAST, 1 }, { SCHEDULE_ROUNDS, 1 }, { SCHEDULE_LOOKAHEAD, 1 }, { SCHEDULE_LAYER_ASSIGN, 1 },
 	{ SCHEDULE_LOOKAHEAD, 2 }, { SCHEDULE_LOOKAHEAD, 3 }, { SCHEDULE_LOOKAHEAD, 6 },
 	{ SCHEDULE_LAYER_ASSIGN, 2 }, { SCHEDULE_LAYER_ASSIGN, 3 }, { SCHEDULE_LAYER_ASSIGN, 6 },
+	{ SCHEDULE_ROUNDS, 1, 1 }, { SCHEDULE_LAYER_ASSIGN, 1, 1 }, { SCHEDULE_LAYER_ASSIGN, 2, 1 },
 };
-#define N_STRATEGIES 11
+static const int bases[] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2, 4, 8 };
+#define N_STRATEGIES 14
 
 // Every circuit in this directory, made by quantumcircuits/generate_benchmark_circuits.py
 #define CIRCUIT_DIR "quantumcircuits/benchmarks"
@@ -268,6 +272,37 @@ static void evaluate_schedule
 	free(layer_starts);
 }
 
+// Operations which run in an order the circuit does not allow: two operations on the same ion in the same round, or two
+// operations on the same ion in the opposite order to the circuit, unless both are diagonal (and so commute)
+static int count_order_violations
+(
+	struct CircuitGraph *circuit_graph,
+	struct ScheduleTrace *trace
+)
+{
+	int n_violations = 0;
+	for (int i = 0; i < circuit_graph->n_instruction_nodes; i++)
+		for (int j = i + 1; j < circuit_graph->n_instruction_nodes; j++)
+		{
+			struct InstructionNode *a = &circuit_graph->instruction_nodes[i];
+			struct InstructionNode *b = &circuit_graph->instruction_nodes[j];
+
+			int share = 0;
+			for (int s = 0; s < a->n_target_ions; s++)
+				for (int t = 0; t < b->n_target_ions; t++)
+					share |= (a->target_ions[s] == b->target_ions[t]);
+
+			if (!share)
+				continue;
+
+			int round_a = trace->transport_rounds[i];
+			int round_b = trace->transport_rounds[j];
+			n_violations += (round_a == round_b) || (round_a > round_b && !(a->diagonal && b->diagonal));
+		}
+
+	return n_violations;
+}
+
 // Whether two transport programs and traces are exactly the same
 static int same_schedule
 (
@@ -336,6 +371,8 @@ int main
 	int n_mismatches = 0;
 	int n_worse = 0;
 	int n_timing = 0;
+	int n_order = 0;
+	int n_commute_slower = 0;
 
 	struct dirent **entries;
 	int n_entries = scandir(CIRCUIT_DIR, &entries, NULL, alphasort);
@@ -345,7 +382,7 @@ int main
 		return 1;
 	}
 
-	printf("%-20s %-42s %-15s %7s %7s %12s %13s %7s %12s\n", "circuit", "layout", "strategy", "valid", "rounds", "makespan(us)", "distance(um)", "moves", "time(us)");
+	printf("%-20s %-42s %-22s %7s %7s %12s %13s %7s %12s\n", "circuit", "layout", "strategy", "valid", "rounds", "makespan(us)", "distance(um)", "moves", "time(us)");
 
 	for (int c = 0; c < n_entries; c++)
 	{
@@ -433,7 +470,7 @@ int main
 
 				int valid = result->scheduled && result->n_invalid == 0;
 				int n_rounds = (programs[s] != NULL) ? traces[s].n_rounds : 0;
-				printf("%-20s %-42s %-15s %7s %7d %12.2f %13.0f %7d %12.2f\n", circuit_name, layouts[l], strategy_names[s],
+				printf("%-20s %-42s %-22s %7s %7d %12.2f %13.0f %7d %12.2f\n", circuit_name, layouts[l], strategy_names[s],
 					!result->scheduled ? "fail" : valid ? "yes" : "NO", n_rounds, 1E6 * result->makespan, result->distance, result->n_moves, 1E6 * result->run_time);
 
 				if (csv != NULL)
@@ -456,13 +493,35 @@ int main
 				int valid = results[s].scheduled && results[s].n_invalid == 0;
 				int slower = valid && s > 2 && results[s].makespan > results[2].makespan * (1.0 + 1E-12);
 
-				if (!valid || (slower && strategies[s].strategy == SCHEDULE_LAYER_ASSIGN && strategies[s].lookahead_layers == 1))
+				if (!valid || (slower && strategies[s].strategy == SCHEDULE_LAYER_ASSIGN && strategies[s].lookahead_layers == 1 && !strategies[s].commute))
 				{
 					printf("  WORSE: %s is %s\n", strategy_names[s], valid ? "slower than rounds" : "invalid");
 					n_worse++;
 				}
 				else if (slower)
 					printf("  NOTE: %s is slower than rounds\n", strategy_names[s]);
+
+				// Moving commuting operations into fewer layers can still lengthen a schedule, which is counted (and
+				// reported) rather than failed
+				if (valid && bases[s] >= 0 && results[bases[s]].scheduled && results[s].makespan > results[bases[s]].makespan * (1.0 + 1E-12))
+				{
+					printf("  NOTE: %s is slower than %s\n", strategy_names[s], strategy_names[bases[s]]);
+					n_commute_slower++;
+				}
+			}
+
+			// Every schedule must run the operations of each ion in an order the circuit allows
+			for (int s = 0; s < N_STRATEGIES; s++)
+			{
+				if (programs[s] == NULL)
+					continue;
+
+				int n_violations = count_order_violations(circuit_graph, &traces[s]);
+				if (n_violations > 0)
+				{
+					printf("  ORDER: %s runs %d pairs of operations in an order the circuit does not allow\n", strategy_names[s], n_violations);
+					n_order++;
+				}
 			}
 
 			for (int s = 0; s < N_STRATEGIES; s++)
@@ -489,7 +548,8 @@ int main
 		printf("\nWrote %s\n", csv_filename);
 	}
 
-	printf("%d mismatches between the fast and baseline schedules, %d invalid schedules or schedules slower than rounds, %d programs whose arrival times disagree with their moves\n", n_mismatches, n_worse, n_timing);
+	printf("%d mismatches between the fast and baseline schedules, %d invalid schedules or schedules slower than rounds, %d programs whose arrival times disagree with their moves, %d schedules which break the order of the circuit\n", n_mismatches, n_worse, n_timing, n_order);
+	printf("%d schedules with commuting operations moved are slower than without (reported, not failed)\n", n_commute_slower);
 
-	return (n_mismatches > 0 || n_worse > 0 || n_timing > 0);
+	return (n_mismatches > 0 || n_worse > 0 || n_timing > 0 || n_order > 0);
 }

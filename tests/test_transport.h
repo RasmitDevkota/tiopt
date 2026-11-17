@@ -54,3 +54,8 @@ int test_lookahead_layers
 (
 	double atol
 );
+
+int test_commuting_layers
+(
+	double atol
+);

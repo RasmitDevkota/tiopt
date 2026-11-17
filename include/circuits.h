@@ -21,6 +21,11 @@ void set_prev_nodes
 	struct InstructionNode *node
 );
 
+void compute_commuting_layers
+(
+	struct CircuitGraph *circuit_graph
+);
+
 void compute_circuit_layers
 (
 	struct CircuitGraph *circuit_graph

@@ -191,6 +191,7 @@ InstructionNode._fields_ = [
     ("graphindex", C.c_int),
     ("n_prev_nodes", C.c_int),
     ("prev_nodes", C.POINTER(InstructionNode)),
+    ("diagonal", C.c_int),
 ]
 
 
@@ -245,6 +246,7 @@ class ScheduleOptionsStruct(C.Structure):
     _fields_ = [
         ("strategy", C.c_int),
         ("lookahead_layers", C.c_int),
+        ("commute", C.c_int),
     ]
 
 
@@ -2325,11 +2327,14 @@ def rabi_frequency_from_intensity(gamma, wavelength, intensity):
 
 @dataclass
 class Instruction:
-    """Instruction of a circuit, with its operation, target ions, layer, and the instructions which come before it."""
+    """Instruction of a circuit, with its operation, target ions, layer, the instructions which come before it, and
+    whether it is diagonal in the computational basis (so that it commutes with every other diagonal instruction).
+    """
     operation: str
     targets: list
     layer: int
     previous: list
+    diagonal: bool = False
 
 
 class Circuit:
@@ -2370,6 +2375,7 @@ class Circuit:
                 [node.target_ions[t] for t in range(node.n_target_ions)],
                 graph.layer_idxs[i],
                 [node.prev_nodes[p].graphindex for p in range(node.n_prev_nodes)],
+                bool(node.diagonal),
             ))
         return instructions
 
@@ -2465,7 +2471,7 @@ class TransportProgram:
     ions (including the moves back into storage between operations) and when it happens.
     """
 
-    def __init__(self, trap_graph, circuit, strategy=None, lookahead_layers=None):
+    def __init__(self, trap_graph, circuit, strategy=None, lookahead_layers=None, commute=False):
         """Schedule the transports of a circuit on the zones of a TrapGraph.
 
         Args:
@@ -2475,6 +2481,8 @@ class TransportProgram:
             lookahead_layers: With the lookahead and layer-assign strategies, an ion stays in its zone after a layer if
                 its next operation is at most this many layers later and can happen there (at least 1, and
                 DEFAULT_LOOKAHEAD_LAYERS if None).
+            commute: Move operations which are diagonal in the computational basis (rz, rzz, cz, cp, ..., which commute
+                with each other) into fewer layers before scheduling; the layers of the circuit itself are unchanged.
         """
         if strategy is None:
             strategy_value = _lib.default_schedule_strategy()
@@ -2483,7 +2491,8 @@ class TransportProgram:
         else:
             raise ValueError(f"unknown strategy {strategy!r}; choose from {', '.join(SCHEDULE_STRATEGIES)}")
         self.lookahead_layers = max(int(DEFAULT_LOOKAHEAD_LAYERS if lookahead_layers is None else lookahead_layers), 1)
-        options = ScheduleOptionsStruct(strategy_value, self.lookahead_layers)
+        self.commute = bool(commute)
+        options = ScheduleOptionsStruct(strategy_value, self.lookahead_layers, int(self.commute))
         self._pointer = None
         self._trace = ScheduleTraceStruct()
         memory = _libc.malloc(C.sizeof(TransportProgramStruct))

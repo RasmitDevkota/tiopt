@@ -9,7 +9,9 @@
 #include "data_structures.h"
 #include "transport.h"
 #include "circuits.h"
+#include "zones.h"
 #include "test_utils.h"
+#include <dirent.h>
 
 int test_all_transport
 (
@@ -30,6 +32,7 @@ int test_all_transport
 	result += test_schedule_rounds_fit_zones(atol);
 	result += test_schedule_trace_times(atol);
 	result += test_lookahead_layers(atol);
+	result += test_commuting_layers(atol);
 
 	return result;
 }
@@ -600,4 +603,147 @@ int test_lookahead_layers
 	}
 
 	return check_error("lookahead_layers keeps ions for operations further ahead", n_wrong, 0);
+}
+
+// Pairs of operations on the same ion which are in the same layer (or round), or in the opposite order to the circuit
+// while not both diagonal
+static int count_order_violations
+(
+	struct CircuitGraph *circuit_graph,
+	const int *layers
+)
+{
+	int n_violations = 0;
+	for (int i = 0; i < circuit_graph->n_instruction_nodes; i++)
+		for (int j = i + 1; j < circuit_graph->n_instruction_nodes; j++)
+		{
+			struct InstructionNode *a = &circuit_graph->instruction_nodes[i];
+			struct InstructionNode *b = &circuit_graph->instruction_nodes[j];
+
+			int share = 0;
+			for (int s = 0; s < a->n_target_ions; s++)
+				for (int t = 0; t < b->n_target_ions; t++)
+					share |= (a->target_ions[s] == b->target_ions[t]);
+
+			if (share)
+				n_violations += (layers[i] == layers[j]) || (layers[i] > layers[j] && !(a->diagonal && b->diagonal));
+		}
+
+	return n_violations;
+}
+
+static int count_layers
+(
+	struct CircuitGraph *circuit_graph
+)
+{
+	int n_layers = 0;
+	for (int i = 0; i < circuit_graph->n_instruction_nodes; i++)
+		n_layers = MAX(n_layers, circuit_graph->layer_idxs[i]);
+
+	return n_layers;
+}
+
+int test_commuting_layers
+(
+	double atol
+)
+{
+	int n_wrong = 0;
+
+	// Gates which are diagonal in the computational basis, whatever their parameters
+	const char *diagonal[] = { "rz(0.5)", "rzz(0.2)", "cz", "cp(pi/4)", "crz(0.1)", "z", "s", "sdg", "t", "tdg", "p(0.3)" };
+	const char *not_diagonal[] = { "h", "x", "cx", "rx(0.1)", "rxx(0.2)", "swap", "measure", "zz" };
+	for (size_t g = 0; g < sizeof(diagonal) / sizeof(diagonal[0]); g++)
+		n_wrong += !is_diagonal_gate(diagonal[g]);
+	for (size_t g = 0; g < sizeof(not_diagonal) / sizeof(not_diagonal[0]); g++)
+		n_wrong += is_diagonal_gate(not_diagonal[g]);
+
+	// No benchmark circuit takes more layers with commuting operations moved, and every layering keeps the order the
+	// circuit allows
+	struct dirent **entries;
+	int n_entries = scandir("quantumcircuits/benchmarks", &entries, NULL, alphasort);
+	int n_circuits = 0;
+	for (int e = 0; e < n_entries; e++)
+	{
+		if (strstr(entries[e]->d_name, ".qasm") != NULL)
+		{
+			char filename[512];
+			snprintf(filename, sizeof(filename), "quantumcircuits/benchmarks/%s", entries[e]->d_name);
+			struct CircuitGraph *circuit_graph = parse_qasm(filename);
+
+			if (circuit_graph == NULL)
+				n_wrong++;
+			else
+			{
+				int n_layers = count_layers(circuit_graph);
+				n_wrong += count_order_violations(circuit_graph, circuit_graph->layer_idxs);
+
+				compute_commuting_layers(circuit_graph);
+				n_wrong += (count_layers(circuit_graph) > n_layers);
+				n_wrong += count_order_violations(circuit_graph, circuit_graph->layer_idxs);
+
+				// QAOA MaxCut on 6 qubits packs its three rzz gates per qubit into 3 layers rather than 6, in each of its
+				// two steps
+				if (strcmp(entries[e]->d_name, "qaoa_06.qasm") == 0)
+					n_wrong += (n_layers != 16) + (count_layers(circuit_graph) != 10);
+
+				free_circuit_graph(circuit_graph);
+				n_circuits++;
+			}
+		}
+
+		free(entries[e]);
+	}
+	free(entries);
+	n_wrong += (n_circuits != 21);
+
+	// Scheduling with commuting operations moved, on a line of five gate zones: the schedule is valid, runs the
+	// operations in an order the circuit allows, takes fewer rounds, and leaves the layers of the circuit as they were
+	struct CircuitGraph *circuit_graph = parse_qasm("quantumcircuits/benchmarks/qaoa_06.qasm");
+	int n_nodes = circuit_graph->n_instruction_nodes;
+	int *layers = malloc(n_nodes * sizeof(int));
+	memcpy(layers, circuit_graph->layer_idxs, n_nodes * sizeof(int));
+
+	int n_zones;
+	enum ZoneType *zone_types;
+	int *zone_capacities;
+	parse_zone_layout("load, storage x2, gate x5, measure", circuit_graph->n_ions, &n_zones, &zone_types, &zone_capacities);
+
+	int n_rounds[2] = { 0, 0 };
+	for (int commute = 0; commute < 2; commute++)
+	{
+		struct TrapGraph trap_graph;
+		generate_linear_trap_graph(n_zones, zone_types, zone_capacities, 0.0, (n_zones - 1) * 100.0, ION_HEIGHT, &trap_graph);
+
+		struct ScheduleOptions options = { SCHEDULE_LAYER_ASSIGN, 1, commute };
+		struct TransportProgram *program = calloc(1, sizeof(struct TransportProgram));
+		struct ScheduleTrace trace = { 0 };
+
+		if (generate_transport_schedule_options(&trap_graph, circuit_graph, program, &options, &trace) == NULL)
+		{
+			n_wrong += 100;
+			free(program);
+		}
+		else
+		{
+			n_wrong += count_invalid(&trap_graph, circuit_graph, program, &trace, atol);
+			n_wrong += count_order_violations(circuit_graph, trace.transport_rounds);
+			n_rounds[commute] = trace.n_rounds;
+			free_transport_program(program);
+		}
+
+		n_wrong += (memcmp(layers, circuit_graph->layer_idxs, n_nodes * sizeof(int)) != 0);
+
+		free_schedule_trace(&trace);
+		free_trap_graph(&trap_graph);
+	}
+	n_wrong += (n_rounds[1] >= n_rounds[0]);
+
+	free(zone_types);
+	free(zone_capacities);
+	free(layers);
+	free_circuit_graph(circuit_graph);
+
+	return check_error("compute_commuting_layers moves commuting operations into fewer layers", n_wrong, 0);
 }

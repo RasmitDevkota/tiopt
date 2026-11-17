@@ -375,12 +375,13 @@ static int schedule_sorted
     struct CircuitGraph *circuitGraph,
     struct TransportProgram *transportProgram,
     struct ZoneNode **ion_states,
-    enum ScheduleStrategy strategy,
-    int lookahead_layers,
+    const struct ScheduleOptions *options,
     int *rounds,
     struct ScheduleTrace *trace
 )
 {
+    enum ScheduleStrategy strategy = options->strategy;
+    int lookahead_layers = MAX(options->lookahead_layers, 1);
     int n_ions = transportProgram->n_ions;
     int n_nodes = circuitGraph->n_instruction_nodes;
 
@@ -388,7 +389,7 @@ static int schedule_sorted
     int *layer_starts;
     int max_layer = sort_circuit_layers(circuitGraph, &order, &layer_starts);
 
-    // Operations of each ion in order (which is also the order of their layers), to look ahead to its next operation
+    // Operations of each ion in the order of their layers, to look ahead to its next operation
     int *ion_op_starts = calloc(n_ions + 1, sizeof(int));
     for (int i = 0; i < n_nodes; i++) {
         for (int t = 0; t < circuitGraph->instruction_nodes[i].n_target_ions; t++) {
@@ -409,6 +410,20 @@ static int schedule_sorted
         }
     }
     memcpy(ion_next, ion_op_starts, n_ions * sizeof(int));
+
+    // The operations of an ion are listed in the order of the circuit, which is also the order of their layers unless
+    // commuting operations were moved into other layers
+    for (int ion = 0; ion < n_ions; ion++) {
+        for (int k = ion_op_starts[ion] + 1; k < ion_op_starts[ion + 1]; k++) {
+            int op = ion_ops[k];
+            int j = k;
+            while (j > ion_op_starts[ion] && circuitGraph->layer_idxs[ion_ops[j - 1]] > circuitGraph->layer_idxs[op]) {
+                ion_ops[j] = ion_ops[j - 1];
+                j--;
+            }
+            ion_ops[j] = op;
+        }
+    }
 
     int *keep = calloc(n_ions, sizeof(int));
     int *next_ops = malloc(n_ions * sizeof(int));
@@ -710,14 +725,14 @@ struct TransportProgram* generate_transport_schedule_strategy
     struct ScheduleTrace *trace
 )
 {
-    struct ScheduleOptions options = { strategy, DEFAULT_LOOKAHEAD_LAYERS };
+    struct ScheduleOptions options = { strategy, DEFAULT_LOOKAHEAD_LAYERS, 0 };
 
     return generate_transport_schedule_options(trapGraph, circuitGraph, transportProgram, &options, trace);
 }
 
-// Generates transport schedule given circuit data and trap data with the given options, recording every move of the ions
-// in trace if it is not NULL
-struct TransportProgram* generate_transport_schedule_options
+// Generates transport schedule given circuit data and trap data with the given options (except commute, which
+// generate_transport_schedule_options handles), recording every move of the ions in trace if it is not NULL
+static struct TransportProgram* schedule_with_options
 (
     struct TrapGraph *trapGraph,
     struct CircuitGraph *circuitGraph,
@@ -727,7 +742,6 @@ struct TransportProgram* generate_transport_schedule_options
 )
 {
     enum ScheduleStrategy strategy = options->strategy;
-    int lookahead_layers = MAX(options->lookahead_layers, 1);
 
     // circuitGraph->n_ions must be initialized
     if (circuitGraph->n_ions <= 0) {
@@ -797,7 +811,7 @@ struct TransportProgram* generate_transport_schedule_options
     if (strategy == SCHEDULE_BASELINE) {
         n_rounds = (schedule_baseline(trapGraph, circuitGraph, transportProgram, ion_states, max_layer, rounds, trace) == 0) ? max_layer : -1;
     } else {
-        n_rounds = schedule_sorted(trapGraph, circuitGraph, transportProgram, ion_states, strategy, lookahead_layers, rounds, trace);
+        n_rounds = schedule_sorted(trapGraph, circuitGraph, transportProgram, ion_states, options, rounds, trace);
     }
 
     free(ion_states);
@@ -824,6 +838,35 @@ struct TransportProgram* generate_transport_schedule_options
     free_schedule_trace(&local_trace);
 
     return transportProgram;
+}
+
+// Generates transport schedule given circuit data and trap data with the given options, recording every move of the ions
+// in trace if it is not NULL; with options->commute, operations which are diagonal in the computational basis are first
+// moved into fewer layers (see compute_commuting_layers), and the layers of the circuit are restored afterwards
+struct TransportProgram* generate_transport_schedule_options
+(
+    struct TrapGraph *trapGraph,
+    struct CircuitGraph *circuitGraph,
+    struct TransportProgram* transportProgram,
+    const struct ScheduleOptions *options,
+    struct ScheduleTrace *trace
+)
+{
+    if (!options->commute) {
+        return schedule_with_options(trapGraph, circuitGraph, transportProgram, options, trace);
+    }
+
+    int n_nodes = circuitGraph->n_instruction_nodes;
+    int *layers = malloc(MAX(n_nodes, 1) * sizeof(int));
+    memcpy(layers, circuitGraph->layer_idxs, n_nodes * sizeof(int));
+
+    compute_commuting_layers(circuitGraph);
+    struct TransportProgram *result = schedule_with_options(trapGraph, circuitGraph, transportProgram, options, trace);
+
+    memcpy(circuitGraph->layer_idxs, layers, n_nodes * sizeof(int));
+    free(layers);
+
+    return result;
 }
 
 int default_schedule_strategy(void)
@@ -860,6 +903,21 @@ enum OperationType get_operation_type(const char *op)
     }
 
     if (strcmp(op, "measure") == 0) return DETECT;
+
+    return 0;
+}
+
+// Whether a gate from QASM code is diagonal in the computational basis (ignoring its parameters), so that it commutes
+// with every other diagonal gate, even one on the same qubits
+int is_diagonal_gate(const char *op)
+{
+    static const char *gates[] = { "z", "s", "sdg", "t", "tdg", "rz", "p", "cz", "cp", "crz", "rzz" };
+
+    size_t length = strcspn(op, "(");
+
+    for (size_t g = 0; g < sizeof(gates) / sizeof(gates[0]); g++) {
+        if (strlen(gates[g]) == length && strncmp(op, gates[g], length) == 0) return 1;
+    }
 
     return 0;
 }
@@ -1020,6 +1078,7 @@ struct CircuitGraph* parse_qasm(const char *filename)
 
         // A gate which is not known would otherwise be left out of the schedule
         enum OperationType op_type = get_operation_type(token);
+        int diagonal = is_diagonal_gate(token);
         if (op_type == 0) {
             printf("ERROR: Circuit contains unknown gate '%s' on line %d\n", token, line_number);
 
@@ -1045,6 +1104,7 @@ struct CircuitGraph* parse_qasm(const char *filename)
         set_prev_nodes(graph, last_node_idxs, targets, n_targets, &node);
 
         node.operation_type = op_type;
+        node.diagonal = diagonal;
         node.operation_duration = 0.0;
         node.graphindex = count + 1;
         node.n_target_ions = n_targets;

@@ -238,7 +238,17 @@ def plan(program, circuit, zone_positions, zone_types, timing=None, mode="eager"
             else:
                 returns[m.transport, m.ion - 1] = since.pop(m.ion - 1, [])
 
-    for i, (targets, destination) in enumerate(zip(program.targets, program.destinations)):
+    # Operations in the order of the circuit, or in the order the schedule runs them when commuting operations were moved
+    # into other layers (and so the order of the circuit is no longer the order of each ion's operations)
+    if getattr(program, "commute", False):
+        order = np.argsort(program.rounds, kind="stable")
+    else:
+        order = range(len(program.targets))
+    all_targets, all_destinations = program.targets, program.destinations
+
+    for i in order:
+        i = int(i)
+        targets, destination = all_targets[i], all_destinations[i]
         ions = [t - 1 for t in targets]
         kind = _kind(instructions[i], len(ions))
         duration = {"measurement": timing.detection_time, "two-qubit gate": timing.two_qubit_time}.get(kind, timing.single_qubit_time)

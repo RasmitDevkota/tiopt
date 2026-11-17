@@ -150,3 +150,27 @@ def test_lookahead_layers(repository, strategy):
         assert _replay_is_valid(scheduled, graph, circuit)
         back = [m for m in scheduled.moves if m.ion == 1 and m.transport < 0 and m.arrive <= scheduled.arrival_times[2]]
         assert bool(back) == goes_back
+
+
+def test_commute_moves_diagonal_gates_into_fewer_rounds(repository):
+    circuit = tiopt.Circuit(repository / "tests" / "quantumcircuits" / "benchmarks" / "qaoa_06.qasm")
+    layers = [i.layer for i in circuit.instructions]
+    assert sum(i.diagonal for i in circuit.instructions) == 18
+    rounds = {}
+    for commute in (False, True):
+        graph = tiopt.TrapGraph.from_layout("load, storage x2, gate x5, measure", 100.0, circuit.n_ions)
+        program = tiopt.TransportProgram(graph, circuit, "layer-assign", commute=commute)
+        assert program.commute == commute
+        assert _replay_is_valid(program, graph, circuit)
+        rounds[commute] = program.n_rounds
+        # Operations on the same ion run in different rounds, in the order of the circuit unless both commute
+        instructions = circuit.instructions
+        for i in range(len(instructions)):
+            for j in range(i + 1, len(instructions)):
+                if set(instructions[i].targets) & set(instructions[j].targets):
+                    assert program.rounds[i] != program.rounds[j]
+                    if program.rounds[i] > program.rounds[j]:
+                        assert commute and instructions[i].diagonal and instructions[j].diagonal
+        # The layers of the circuit itself are unchanged
+        assert [i.layer for i in circuit.instructions] == layers
+    assert rounds[True] < rounds[False]

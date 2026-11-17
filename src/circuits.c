@@ -82,6 +82,196 @@ void set_prev_nodes
 	}
 }
 
+// Layers of the diagonal operations of a batch placed one way (see compute_commuting_layers): 0 at the earliest layer
+// after the last operations on their qubits in order, 1 at the earliest free layer after the last non-diagonal
+// operations on their qubits in order, and 2 like 1 but with the operations on the busiest qubits first. Fills layers
+// with the layer of each operation of the batch and used with the layers each qubit is busy in, and returns the
+// highest layer of the batch, with the sum of the last layers of its qubits in sum
+static int place_diagonal_batch
+(
+	struct CircuitGraph *circuit_graph,
+	const int *batch,
+	int n_batch,
+	int method,
+	const int *ready,
+	const int *last,
+	int n_slots,
+	char *used,
+	int *layers,
+	long *sum
+)
+{
+	int n_ions = circuit_graph->n_ions;
+
+	// Order of the operations, by how busy their busiest qubit is in the batch (and then in order) for method 2
+	int *order = malloc(n_batch * sizeof(int));
+	int *degree = calloc(n_ions, sizeof(int));
+	int *key = malloc(n_batch * sizeof(int));
+	for (int k = 0; k < n_batch; k++)
+	{
+		struct InstructionNode *node = &circuit_graph->instruction_nodes[batch[k]];
+		for (int t = 0; t < node->n_target_ions; t++)
+			degree[node->target_ions[t] - 1]++;
+	}
+	for (int k = 0; k < n_batch; k++)
+	{
+		struct InstructionNode *node = &circuit_graph->instruction_nodes[batch[k]];
+		key[k] = 0;
+		for (int t = 0; t < node->n_target_ions; t++)
+			key[k] = MAX(key[k], degree[node->target_ions[t] - 1]);
+
+		int j = k;
+		while (method == 2 && j > 0 && key[order[j - 1]] < key[k])
+		{
+			order[j] = order[j - 1];
+			j--;
+		}
+		order[j] = k;
+	}
+
+	int *qubit_last = malloc(n_ions * sizeof(int));
+	memcpy(qubit_last, last, n_ions * sizeof(int));
+
+	int highest = 0;
+	for (int o = 0; o < n_batch; o++)
+	{
+		int k = order[o];
+		struct InstructionNode *node = &circuit_graph->instruction_nodes[batch[k]];
+
+		int layer = 1;
+		for (int t = 0; t < node->n_target_ions; t++)
+		{
+			int q = node->target_ions[t] - 1;
+			layer = MAX(layer, ((method == 0) ? qubit_last[q] : ready[q]) + 1);
+		}
+
+		// The earliest layer in which none of the qubits is busy
+		for (int busy = 1; busy && method != 0; )
+		{
+			busy = 0;
+			for (int t = 0; t < node->n_target_ions; t++)
+				busy |= used[(node->target_ions[t] - 1) * n_slots + layer];
+			layer += busy;
+		}
+
+		layers[k] = layer;
+		highest = MAX(highest, layer);
+		for (int t = 0; t < node->n_target_ions; t++)
+		{
+			int q = node->target_ions[t] - 1;
+			used[q * n_slots + layer] = 1;
+			qubit_last[q] = MAX(qubit_last[q], layer);
+		}
+	}
+
+	*sum = 0;
+	for (int q = 0; q < n_ions; q++)
+		*sum += (degree[q] > 0) ? qubit_last[q] : 0;
+
+	free(qubit_last);
+	free(key);
+	free(degree);
+	free(order);
+
+	return highest;
+}
+
+// Assign every instruction node to a layer like compute_circuit_layers, but letting operations which are diagonal in the
+// computational basis (which all commute with each other) change places, to fit them into fewer layers: diagonal
+// operations wait in a batch until a non-diagonal operation (or the end of the circuit) comes, and then each batch is
+// placed in whichever of three ways ends it soonest (see place_diagonal_batch), where none of them puts two operations
+// on the same qubit in the same layer, or a diagonal operation before the last non-diagonal operation on its qubits
+void compute_commuting_layers
+(
+	struct CircuitGraph *circuit_graph
+)
+{
+	int n_nodes = circuit_graph->n_instruction_nodes;
+	int n_ions = MAX(circuit_graph->n_ions, 1);
+	int n_slots = n_nodes + 2;
+
+	int *ready = calloc(n_ions, sizeof(int)); // layer of the last non-diagonal operation on each qubit
+	int *last = calloc(n_ions, sizeof(int)); // last layer each qubit is busy in
+	char *used = calloc((size_t) n_ions * n_slots, sizeof(char)); // layers each qubit is busy in with diagonal operations
+	char *trial = malloc((size_t) n_ions * n_slots * sizeof(char));
+	int *batch = malloc(MAX(n_nodes, 1) * sizeof(int));
+	int *layers = malloc(MAX(n_nodes, 1) * sizeof(int));
+	int *best_layers = malloc(MAX(n_nodes, 1) * sizeof(int));
+	int n_batch = 0;
+
+	for (int i = 0; i <= n_nodes; i++)
+	{
+		struct InstructionNode *node = (i < n_nodes) ? &circuit_graph->instruction_nodes[i] : NULL;
+
+		if (node != NULL && node->diagonal)
+		{
+			batch[n_batch++] = i;
+			continue;
+		}
+
+		// Place the waiting diagonal operations
+		if (n_batch > 0)
+		{
+			int best_method = -1;
+			int best_highest = 0;
+			long best_sum = 0;
+			for (int method = 0; method < 3; method++)
+			{
+				memcpy(trial, used, (size_t) n_ions * n_slots);
+				long sum;
+				int highest = place_diagonal_batch(circuit_graph, batch, n_batch, method, ready, last, n_slots, trial, layers, &sum);
+
+				if (best_method < 0 || highest < best_highest || (highest == best_highest && sum < best_sum))
+				{
+					best_method = method;
+					best_highest = highest;
+					best_sum = sum;
+					memcpy(best_layers, layers, n_batch * sizeof(int));
+				}
+			}
+
+			for (int k = 0; k < n_batch; k++)
+			{
+				struct InstructionNode *batch_node = &circuit_graph->instruction_nodes[batch[k]];
+				circuit_graph->layer_idxs[batch[k]] = best_layers[k];
+
+				for (int t = 0; t < batch_node->n_target_ions; t++)
+				{
+					int q = batch_node->target_ions[t] - 1;
+					used[q * n_slots + best_layers[k]] = 1;
+					last[q] = MAX(last[q], best_layers[k]);
+				}
+			}
+
+			n_batch = 0;
+		}
+
+		if (node == NULL)
+			break;
+
+		// A non-diagonal operation follows everything on its qubits
+		int layer = 1;
+		for (int t = 0; t < node->n_target_ions; t++)
+			layer = MAX(layer, last[node->target_ions[t] - 1] + 1);
+
+		circuit_graph->layer_idxs[i] = layer;
+		for (int t = 0; t < node->n_target_ions; t++)
+		{
+			int q = node->target_ions[t] - 1;
+			ready[q] = layer;
+			last[q] = layer;
+		}
+	}
+
+	free(best_layers);
+	free(layers);
+	free(batch);
+	free(trial);
+	free(used);
+	free(last);
+	free(ready);
+}
+
 // Assign every instruction node to the earliest layer (starting at 1) after the layers of all of its previous nodes
 void compute_circuit_layers
 (

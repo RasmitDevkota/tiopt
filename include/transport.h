@@ -31,6 +31,7 @@ struct ScheduleOptions
     enum ScheduleStrategy strategy;
     int lookahead_layers; // with SCHEDULE_LOOKAHEAD and SCHEDULE_LAYER_ASSIGN, an ion stays in its zone after a layer if
                           // its next operation is at most this many layers later and can happen there (at least 1)
+    int commute; // move operations which are diagonal in the computational basis (and so commute) into fewer layers
 };
 
 // A move of an ion from one zone of a trap graph to another
@@ -90,6 +91,8 @@ int default_schedule_strategy(void);
 struct TransportProgram* simple_transport_schedule ();
 
 struct CircuitGraph* parse_qasm(const char *filename);
+
+int is_diagonal_gate(const char *op);
 
 struct ZoneNode* select_available_zone
 (

@@ -7,7 +7,8 @@ ions away before their operations happen), and the makespan of an invalid schedu
 compared with the rounds strategy: the baseline with layers split into rounds which fit in the zones, which is always
 valid. Comparisons with the baseline itself are only made where its schedules are valid. The lookahead strategies are
 also run looking further ahead (e.g. lookahead-3 keeps an ion in its zone for an operation up to 3 layers later), and
-these are compared with rounds and with looking one layer ahead.
+these are compared with rounds and with looking one layer ahead. Strategies with commuting (diagonal) operations moved
+into fewer layers (e.g. rounds-commute) are compared with the same strategy without.
 """
 
 import csv
@@ -17,6 +18,7 @@ from collections import defaultdict
 
 STRATEGIES = ["baseline", "fast", "rounds", "lookahead", "layer-assign"]
 DEPTHS = [1, 2, 3, 6]
+VARIANTS = [("rounds-commute", "rounds"), ("layer-assign-commute", "layer-assign"), ("layer-assign-2-commute", "layer-assign-2")]
 
 
 def variant(strategy, depth):
@@ -92,6 +94,38 @@ def main():
               + f" {statistics.median(speedups):13.2f}x")
 
     depth_section(cases, families)
+    variant_section(cases, families)
+
+
+def variant_section(cases, families):
+    """Compare each strategy run with commuting operations moved into fewer layers with the same strategy without."""
+    present = set().union(*(r.keys() for r in cases.values()))
+    pairs = [(v, b) for v, b in VARIANTS if v in present and b in present]
+    if not pairs:
+        return
+
+    rows = list(cases.values())
+    print("\nValid schedules with commuting operations moved (of all circuits and layouts)")
+    print("  ".join(f"{v}: {sum(r[v]['valid'] for r in rows)} / {len(rows)}" for v, _ in pairs))
+
+    for metric, title in [("makespan_us", "Makespan"), ("distance_um", "Transport distance")]:
+        print(f"\n{title} reduction with commuting operations moved: median [min, max], and cases better/same/worse")
+        print(f"{'family':12s}  " + "  ".join(f"{v + ' vs ' + b:>46s}" for v, b in pairs))
+        for name in families + ["all"]:
+            group = [r for (c, _), r in cases.items() if name in ("all", family(c))]
+            cells = []
+            for v, b in pairs:
+                values = [reduction(r[v][metric], r[b][metric]) for r in group]
+                counts = f"{sum(x > 1E-9 for x in values)}/{sum(abs(x) <= 1E-9 for x in values)}/{sum(x < -1E-9 for x in values)}"
+                cells.append(f"{spread(values)} {counts:>8s}")
+            print(f"{name:12s}  " + "  ".join(f"{c:>46s}" for c in cells))
+
+    print("\nRounds with commuting operations moved: median rounds without -> with")
+    print(f"{'family':12s}  " + "  ".join(f"{v:>24s}" for v, _ in pairs))
+    for name in families + ["all"]:
+        group = [r for (c, _), r in cases.items() if name in ("all", family(c))]
+        cells = [f"{statistics.median(int(r[b]['rounds']) for r in group):g} -> {statistics.median(int(r[v]['rounds']) for r in group):g}" for v, b in pairs]
+        print(f"{name:12s}  " + "  ".join(f"{c:>24s}" for c in cells))
 
 
 def depth_section(cases, families):
