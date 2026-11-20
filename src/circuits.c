@@ -455,10 +455,10 @@ void schedule_arrival_times_in_rounds
 // Cost model of time_schedule_trace when it is given none: the defaults of tiopt.qccd.TimingModel and
 // tiopt.qccd.NoiseModel (from P. Murali et al., ISCA 2020), in s rather than µs. A split or merge takes 80 µs, crossing
 // a Y or X junction 100 or 120 µs, and ions move at 20 µm/µs; two-qubit gates follow the FM gate model, and ions reach
-// the end of their chain with a SWAP gate or physical swaps, whichever costs less fidelity, where gates can be done (and
-// with physical swaps elsewhere). Splits, merges and junction crossings add 0.1 quanta,
-// every 100 µm moved 0.01, and every chain and moving ion heats by 100 quanta/s; a two-qubit gate fails with
-// probability 1 µs^-1 times its duration plus A (2 n_bar + 1), where A = 1E-4 N / ln N
+// the end of their chain with a SWAP gate or physical swaps, whichever costs less fidelity, where gates can be done
+// (and with physical swaps elsewhere). Splits, merges and junction crossings add 0.1 quanta, every 100 µm moved 0.01,
+// and every chain and moving ion heats by 100 quanta/s; a two-qubit gate fails with probability 1 µs^-1 times its
+// duration plus A (2 n_bar + 1), where A = 1E-4 N / ln N
 struct TransportCostModel default_transport_cost_model
 (
 )
@@ -719,20 +719,23 @@ static int swap_gate_is_cheaper
 	double n_bar = state->energies[zone] + cost_model->background_heating * MAX(t - state->energy_times[zone], 0.0);
 	double gate = two_qubit_gate_time(cost_model, n, distance);
 	double size = MAX(n, 2);
-	double error = cost_model->gate_background_error * gate + cost_model->motional_error * size / log(size) * (2.0 * n_bar + 1.0);
+	double A = cost_model->motional_error * size / log(size);
+	double error = cost_model->gate_background_error * gate + A * (2.0 * n_bar + 1.0);
 	double gate_cost = 1.0 - pow(MAX(1.0 - error, 0.0), 3);
 
-	// Infidelity which each quantum added to the chain causes later, in the later gates of its ions (each between two of
-	// them)
+	// Infidelity which each quantum added to the chain causes later, in the later gates of its ions (each between two
+	// of them)
 	int later = 0;
 	for (int k = 0; k < n; k++)
 		later += state->later_gates[chain[k] - 1];
 
-	double per_quantum = 2.0 * cost_model->motional_error * size / log(size) * 0.5 * later;
+	double per_quantum = 2.0 * A * 0.5 * later;
 
 	double swap_time = cost_model->split + cost_model->rotation + cost_model->merge;
 	double gate_heat = cost_model->background_heating * 3 * gate;
-	double physical_heat = distance * (cost_model->split_heating + cost_model->merge_heating + cost_model->background_heating * swap_time);
+	double swap_heat = cost_model->split_heating + cost_model->merge_heating;
+	swap_heat += cost_model->background_heating * swap_time;
+	double physical_heat = distance * swap_heat;
 
 	return gate_cost + gate_heat * per_quantum < physical_heat * per_quantum;
 }
@@ -762,7 +765,12 @@ static double reorder_to_end
 
 	int gate_swap = 0;
 	if (state->trap_graph->zone_nodes[zone].zone_type & GATE_ZONE)
-		gate_swap = (cost_model->swap_gates == SWAP_CHEAPER) ? swap_gate_is_cheaper(state, zone, position, target, t) : (cost_model->swap_gates == SWAP_GATES);
+	{
+		if (cost_model->swap_gates == SWAP_CHEAPER)
+			gate_swap = swap_gate_is_cheaper(state, zone, position, target, t);
+		else
+			gate_swap = (cost_model->swap_gates == SWAP_GATES);
+	}
 
 	if (gate_swap)
 	{

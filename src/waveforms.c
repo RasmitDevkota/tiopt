@@ -233,10 +233,10 @@ void waveform_potential_derivatives
 }
 
 // Build the constraints, linear in the DC voltages, which place a potential well at a position: no net force on the
-// ion, the axial direction of the well as a principal axis, and the target axial curvature along it. The axial direction
-// is the trap axis (x) turned by an angle in the x-y plane (0 for a well along the trap axis), so that turning a well
-// holding two ions by pi swaps them. The rows are scaled by ION_HEIGHT so that every constraint is measured in volts.
-// rows has length N_WELL_CONSTRAINTS-by-n_electrodes_dc
+// ion, the axial direction of the well as a principal axis, and the target axial curvature along it. The axial
+// direction is the trap axis (x) turned by an angle in the x-y plane (0 for a well along the trap axis), so that
+// turning a well holding two ions by pi swaps them. The rows are scaled by ION_HEIGHT so that every constraint is
+// measured in volts. rows has length N_WELL_CONSTRAINTS-by-n_electrodes_dc
 void build_well_constraints
 (
 	struct Trap *trap,
@@ -293,7 +293,8 @@ void build_well_constraints
 	targets[CONSTRAINT_EX_FIELD_Z] = -grad_U_pond[2] / q * L_c;
 	targets[CONSTRAINT_HESSIAN_XY] = -directional_curvature(H_U_pond, axial, across) / q * L_c*L_c;
 	targets[CONSTRAINT_HESSIAN_XZ] = -directional_curvature(H_U_pond, axial, vertical) / q * L_c*L_c;
-	targets[CONSTRAINT_AXIAL_CURVATURE] = (axial_curvature - directional_curvature(H_U_pond, axial, axial)) / q * L_c*L_c;
+	double axial_curvature_pond = directional_curvature(H_U_pond, axial, axial);
+	targets[CONSTRAINT_AXIAL_CURVATURE] = (axial_curvature - axial_curvature_pond) / q * L_c*L_c;
 }
 
 // Add a value to element (i, j), with i >= j, of a symmetric matrix in GSL's banded format
@@ -773,8 +774,8 @@ static int compare_doubles
 	return (x > y) - (x < y);
 }
 
-// Motion of a well in a waveform of a schedule between two times: a move from start to end along a minimum-jerk profile,
-// or a turn of its axial direction by an angle in the x-y plane (with start and end where the well is)
+// Motion of a well in a waveform of a schedule between two times: a move from start to end along a minimum-jerk
+// profile, or a turn of its axial direction by an angle in the x-y plane (with start and end where the well is)
 struct WellMotion
 {
 	int well;
@@ -801,8 +802,8 @@ static int compare_well_motions
 	return (x->t0 > y->t0) - (x->t0 < y->t0);
 }
 
-// Position of a well at a time, following its motions (motions[first] to motions[last - 1], sorted by time, which do not
-// overlap) from where it starts
+// Position of a well at a time, following its motions (motions[first] to motions[last - 1], sorted by time, which do
+// not overlap) from where it starts
 static void well_position_at
 (
 	struct WellMotion *motions,
@@ -840,20 +841,20 @@ static void well_position_at
 		position[k] = motion->start[k] + fraction * (motion->end[k] - motion->start[k]);
 }
 
-// Convert a schedule trace (see time_schedule_trace) into a waveform with a well for every ion. If the trace records the
-// steps of its moves, the wells follow them: each well moves only while its ion moves along a segment (from the center
-// of one zone to the next, along a minimum-jerk profile), and holds still through splits, merges, junction crossings,
-// SWAP gates and operations, and while its ion waits for a segment or a zone, so that the wells are where the ions are
-// at every moment. A physical swap of the two ions of a chain turns the axial direction of their well by pi in the x-y
-// plane over the whole swap (a two-ion chain has nothing to split off, so the split and merge of the swap leave the turn
-// more time), which brings each ion to where the other was; in a longer chain, the pair would first have to be split
-// into a well of its own, which the zones of a trap graph (a point each) do not resolve, so the well holds still there.
-// A trace without steps is followed move by move instead, where every move, including the moves back into storage,
-// takes its ion between the centers of its zones along a minimum-jerk profile from its departure to its arrival. Moves
-// which overlap in time happen at once, while the ions which are not moving are held in place, and each move along a
-// segment (or each move, without steps) and each turn takes n_steps_per_move steps, while every other step of the trace
-// adds a step at its start and its end (so the waveform lasts until the last operation ends). Returns NULL if no ion
-// moves or the voltages cannot be found
+// Convert a schedule trace (see time_schedule_trace) into a waveform with a well for every ion. If the trace records
+// the steps of its moves, the wells follow them: each well moves only while its ion moves along a segment (from the
+// center of one zone to the next, along a minimum-jerk profile), and holds still through splits, merges, junction
+// crossings, SWAP gates and operations, and while its ion waits for a segment or a zone, so that the wells are where
+// the ions are at every moment. A physical swap of the two ions of a chain turns the axial direction of their well by
+// pi in the x-y plane over the whole swap (a two-ion chain has nothing to split off, so the split and merge of the swap
+// leave the turn more time), which brings each ion to where the other was; in a longer chain, the pair would first have
+// to be split into a well of its own, which the zones of a trap graph (a point each) do not resolve, so the well holds
+// still there. A trace without steps is followed move by move instead, where every move, including the moves back into
+// storage, takes its ion between the centers of its zones along a minimum-jerk profile from its departure to its
+// arrival. Moves which overlap in time happen at once, while the ions which are not moving are held in place, and each
+// move along a segment (or each move, without steps) and each turn takes n_steps_per_move steps, while every other step
+// of the trace adds a step at its start and its end (so the waveform lasts until the last operation ends). Returns NULL
+// if no ion moves or the voltages cannot be found
 struct TransportWaveform* schedule_trace_to_waveform
 (
 	struct Trap *trap,
@@ -911,7 +912,7 @@ struct TransportWaveform* schedule_trace_to_waveform
 	for (int i = 1; i <= n_ions; i++)
 		well_starts[i] += well_starts[i - 1];
 
-	// Physical swaps of the two ions of a chain turn their well, where the chain is every well at the center of the zone
+	// Physical swaps of the two ions of a chain (the wells at the center of the zone) turn their well
 	int n_moves_only = n_motions;
 	double position[3];
 	for (int k = 0; k < trace->n_steps; k++)
@@ -926,7 +927,13 @@ struct TransportWaveform* schedule_trace_to_waveform
 		int n_here = 0;
 		for (int i = 0; i < n_ions; i++)
 		{
-			well_position_at(motions, well_starts[i], well_starts[i + 1], transport_program->initial_positions[i], t, position);
+			well_position_at(
+				motions,
+				well_starts[i], well_starts[i + 1],
+				transport_program->initial_positions[i],
+				t,
+				position
+			);
 			if (fabs(position[0] - center[0]) + fabs(position[1] - center[1]) + fabs(position[2] - center[2]) < 1E-6)
 				n_here++;
 		}

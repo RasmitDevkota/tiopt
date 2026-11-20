@@ -478,7 +478,15 @@ int test_schedule_steps_to_waveform
 	trace.max_steps = 7;
 	trace.steps = steps;
 
-	struct TransportWaveform *waveform = schedule_trace_to_waveform(&trap, &ion, &trap_graph, &transport_program, &trace, 31, AXIAL_FREQUENCY);
+	struct TransportWaveform *waveform = schedule_trace_to_waveform(
+		&trap,
+		&ion,
+		&trap_graph,
+		&transport_program,
+		&trace,
+		31,
+		AXIAL_FREQUENCY
+	);
 	if (waveform == NULL)
 	{
 		free_trap(&trap);
@@ -523,15 +531,22 @@ int test_schedule_steps_to_waveform
 
 	int result = check_error("schedule_trace_to_waveform follows the steps", error + (mid_turn < 0), atol);
 
-	// Through the turn, the weakest mode of the well points along its axial direction (across the trap axis halfway), at
-	// the target frequency
+	// Through the turn, the weakest mode of the well points along its axial direction (across the trap axis halfway),
+	// at the target frequency
 	double max_axis_error = (mid_turn < 0);
 	double max_frequency_error = 0.0;
 	for (int s = 0; s < waveform->n_waveform_steps && waveform->times[s] <= 202E-6 + 1E-12; s++)
 	{
 		double omega[3];
 		double axes[3][3];
-		compute_normal_modes(&trap, m, q, &waveform->voltages[s * waveform->n_electrodes], zones[0].position, &omega, &axes);
+		compute_normal_modes(
+			&trap,
+			m, q,
+			&waveform->voltages[s * waveform->n_electrodes],
+			zones[0].position,
+			&omega,
+			&axes
+		);
 
 		int weakest = 0;
 		for (int k = 1; k < 3; k++)
