@@ -215,12 +215,18 @@ class Architecture:
         return cls.from_zones(trap.zones(), default_capacity)
 
 
+# Ways of bringing an ion to the end of its chain (see TimingModel)
+SWAP_TYPES = ("cheaper", "gate", "ion")
+
+
 @dataclass
 class TimingModel:
     """Durations (µs) of the operations of a QCCD architecture, with the defaults of Murali et al.: a split or merge
     takes 80 µs, crossing a Y or X junction 100 or 120 µs, and moving at speed (µm/µs, 20 by default) takes 5 µs per
     100 µm segment. Two-qubit gates follow a gate model of tiopt.gates.gate_time_model, and reordering uses SWAP gates
-    ("gate") or physical ion swaps ("ion", a split, a rotation, and a merge per position).
+    ("gate"), physical ion swaps ("ion", a split, a rotation, and a merge per position), or whichever of the two costs
+    less fidelity ("cheaper", the default, which only uses SWAP gates in traps where gates can be done): a SWAP gate
+    fails at once, while the quanta of physical swaps lower the fidelity of every later gate of the ions of the chain.
     """
     speed: float = 20.0
     min_move: float = 1.0
@@ -232,7 +238,7 @@ class TimingModel:
     single_qubit: float = 5.0
     measurement: float = 100.0
     gate_model: str = "FM"
-    swap_type: str = "gate"
+    swap_type: str = "cheaper"
 
     def move_time(self, length):
         return max(length / self.speed, self.min_move)
@@ -334,6 +340,8 @@ class _Compiler:
         self.counts = {}
         self.fidelity = 1.0
         self.max_n_bar = 0.0
+        # Mølmer-Sørensen gates which each qubit has yet to take part in
+        self.later = {q: 0 for q in range(n_qubits)}
 
     def count(self, kind, n=1):
         self.counts[kind] = self.counts.get(kind, 0) + n
@@ -404,6 +412,8 @@ class _Compiler:
         duration = self.gate_time(trap, a, b)
         end = self.record("two-qubit gate", start, duration, [trap], [a, b], self.two_qubit_fidelity(trap, duration), label)
         self.free[trap] = self.qubit_free[a] = self.qubit_free[b] = end
+        self.later[a] -= 1
+        self.later[b] -= 1
 
     def single(self, q, label, kind="single-qubit gate", duration=None, error=None):
         trap = self.location[q]
@@ -412,6 +422,26 @@ class _Compiler:
         error = self.noise.single_qubit_error if error is None else error
         end = self.record(kind, start, duration, [trap], [q], 1 - error, label)
         self.free[trap] = self.qubit_free[q] = end
+
+    def swap_gate_is_cheaper(self, trap, position, target):
+        """Whether a SWAP gate costs less fidelity than physically swapping places with each ion on the way to bring the
+        qubit at one place in the chain of a trap to another (as swap_gate_is_cheaper in circuits.c): the SWAP gate
+        fails now, while the quanta which the physical swaps add (and the background heating while either happens) stay
+        in the chain and lower the fidelity of every later two-qubit gate of its qubits, counted as if the chain stayed
+        together for them.
+        """
+        chain = self.chains[trap]
+        size = max(len(chain), 2)
+        A = self.noise.motional_error * size / np.log(size)
+        distance = abs(target - position)
+        gate = self.timing.two_qubit_time(len(chain), distance)
+        error = self.noise.gate_background_error * gate + A * (2 * self.energy[trap] + 1)
+        gate_cost = 1 - max(1 - error, 0.0) ** 3
+        per_quantum = 2 * A * 0.5 * sum(self.later[c] for c in chain)
+        swap_time = self.timing.split + self.timing.rotation + self.timing.merge
+        gate_heat = self.noise.background_heating * 3 * gate
+        physical_heat = distance * (self.noise.split_heating + self.noise.merge_heating + self.noise.background_heating * swap_time)
+        return gate_cost + gate_heat * per_quantum < physical_heat * per_quantum
 
     def to_end(self, q, end_index):
         """Bring qubit q to an end of its chain (0 for the front and -1 for the back)."""
@@ -423,7 +453,10 @@ class _Compiler:
             return
         start = max(self.free[trap], self.qubit_free[q])
         self.heat(trap, start)
-        if self.timing.swap_type == "gate":
+        gate_swap = self.timing.swap_type == "gate"
+        if self.timing.swap_type == "cheaper" and self.arch.nodes[trap].gate_zone:
+            gate_swap = self.swap_gate_is_cheaper(trap, position, target)
+        if gate_swap:
             # A SWAP gate (three MS gates) exchanges the states of q and the ion at the end
             other = chain[target]
             duration = 3 * self.timing.two_qubit_time(len(chain), abs(target - position))
@@ -565,7 +598,14 @@ def compile_circuit(circuit, architecture, timing=None, noise=None):
     noise = NoiseModel() if noise is None else noise
     if timing.gate_model not in GATE_MODELS:
         raise ValueError(f"unknown gate model {timing.gate_model!r}; choose from {', '.join(GATE_MODELS)}")
+    if timing.swap_type not in SWAP_TYPES:
+        raise ValueError(f"unknown swap type {timing.swap_type!r}; choose from {', '.join(SWAP_TYPES)}")
     compiler = _Compiler(architecture, timing, noise, circuit.n_qubits)
+    for gate in circuit.gates:
+        if gate.name not in ("barrier", "measure") and len(gate.qubits) >= 2:
+            for a, b in _pairs(gate, MS_PER_GATE.get(gate.name, 1)):
+                compiler.later[a] += 1
+                compiler.later[b] += 1
     compiler.place(circuit)
     initial = {q: architecture.nodes[t].name for q, t in compiler.location.items()}
     for gate in circuit.gates:

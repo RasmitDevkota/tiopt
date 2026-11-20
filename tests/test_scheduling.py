@@ -340,3 +340,30 @@ def test_fidelity_follows_qccd_noise_model(tmp_path):
     assert program.max_n_bar == pytest.approx(n_bars.max())
     assert not any(step.type == "gate swap" for step in program.steps)
     assert program.check() == []
+
+
+def test_cheaper_swaps(repository):
+    from tiopt import qccd
+
+    # Gate traps of 6 ions beyond a Y junction, where ions kept in a trap by lookahead make others reorder to reach them
+    architecture = qccd.Architecture()
+    storage = architecture.add_trap("S", 6, (-200.0, 0.0), gate_zone=False)
+    junction = architecture.add_junction("J", (0.0, 0.0))
+    upper = architecture.add_trap("G1", 6, (150.0, 100.0))
+    lower = architecture.add_trap("G2", 6, (150.0, -100.0))
+    architecture.connect(storage, junction, 200.0)
+    architecture.connect(junction, upper, 180.0)
+    architecture.connect(junction, lower, 180.0)
+    circuit = tiopt.Circuit(repository / "tests" / "quantumcircuits" / "benchmarks" / "qft_06.qasm")
+    programs = {}
+    for swap in qccd.SWAP_TYPES:
+        cost_model = tiopt.transport_cost_model(qccd.TimingModel(swap_type=swap))
+        programs[swap] = tiopt.TransportProgram(tiopt.TrapGraph.from_architecture(architecture), circuit, "lookahead", cost_model=cost_model)
+        assert programs[swap].check() == []
+    # The default takes a SWAP gate or physical swaps, whichever costs less fidelity, which beats either on its own here
+    kinds = {step.type for step in programs["cheaper"].steps}
+    assert {"gate swap", "ion swap"} <= kinds
+    assert programs["cheaper"].fidelity > max(programs["gate"].fidelity, programs["ion"].fidelity)
+    assert tiopt.lib._lib.default_transport_cost_model().swap_gates == tiopt.lib.TRANSPORT_SWAP_METHODS["cheaper"]
+    with pytest.raises(ValueError):
+        tiopt.transport_cost_model(qccd.TimingModel(swap_type="teleport"))

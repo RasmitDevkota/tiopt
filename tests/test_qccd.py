@@ -46,6 +46,25 @@ def test_compiling_ghz(tmp_path):
     assert result.counts.get("split", 0) == 0
 
 
+def test_cheaper_swaps():
+    # Over the benchmark circuits, taking a SWAP gate or physical swaps, whichever costs less fidelity, beats always
+    # taking SWAP gates and is never far below always swapping physically
+    from pathlib import Path
+
+    benchmarks = Path(__file__).parent / "quantumcircuits" / "benchmarks"
+    fidelities = {swap: [] for swap in qccd.SWAP_TYPES}
+    for name in ("ghz_06", "qft_06", "qaoa_06", "cuccaro_06"):
+        circuit = circuits.parse_qasm((benchmarks / f"{name}.qasm").read_text())
+        for swap in qccd.SWAP_TYPES:
+            result = qccd.compile_circuit(circuit, qccd.Architecture.linear(4, 4), qccd.TimingModel(swap_type=swap))
+            fidelities[swap].append(result.fidelity)
+    cheaper, gate, ion = (np.array(fidelities[swap]) for swap in ("cheaper", "gate", "ion"))
+    assert np.all(cheaper >= gate) and np.all(cheaper >= 0.999 * ion)
+    assert qccd.TimingModel().swap_type == "cheaper"
+    with pytest.raises(ValueError):
+        qccd.compile_circuit(circuits.parse_qasm(circuits.PRESETS["GHZ (5 qubits)"]), qccd.Architecture.linear(3, 4), qccd.TimingModel(swap_type="teleport"))
+
+
 def test_larger_traps_shuttle_less():
     circuit = random_circuit(12, 40)
     small = qccd.compile_circuit(circuit, qccd.Architecture.linear(6, 4))

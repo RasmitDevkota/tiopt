@@ -36,6 +36,14 @@ enum TransportGateModel
     GATE_MODEL_FM, // max(13.33 N - 54, 100) µs
 };
 
+// How an ion reaches the end of its chain in a zone where gates can be done, to leave it or pass through it
+enum TransportSwapMethod
+{
+    SWAP_PHYSICAL, // swapping places with each ion on the way (a split, a rotation and a merge each)
+    SWAP_GATES, // a SWAP gate (three two-qubit gates) with the ion at the end (the "gate" swaps of tiopt.qccd)
+    SWAP_CHEAPER, // whichever costs the schedule less fidelity, by the estimate of swap_gate_is_cheaper in circuits.c
+};
+
 // Durations of the steps which move ions along the segments of a trap graph and of the operations (see
 // time_schedule_trace), and the heating and errors which give the fidelity of a schedule: the TimingModel and NoiseModel
 // of tiopt.qccd (in s rather than µs)
@@ -48,9 +56,8 @@ struct TransportCostModel
     double junction_y; // crossing a junction of three segments (s)
     double junction_x; // crossing a junction of four or more segments (s)
     double rotation; // rotating two neighboring ions to swap them, which also takes a split and a merge (s)
-    int swap_gates; // bring an ion to the end of its chain with a SWAP gate (three two-qubit gates) with the ion there
-                    // in zones where gates can be done (the "gate" swaps of tiopt.qccd), rather than by swapping places
-                    // with each ion on the way
+    int swap_gates; // enum TransportSwapMethod: how an ion reaches the end of its chain in a zone where gates can be
+                    // done (elsewhere, it always swaps places with each ion on the way)
     int gate_model; // enum TransportGateModel
     double two_qubit; // duration of a two-qubit gate with GATE_MODEL_FIXED (s)
     double single_qubit; // duration of a single-qubit gate which is not virtual (s)

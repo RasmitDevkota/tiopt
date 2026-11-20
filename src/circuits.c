@@ -455,7 +455,8 @@ void schedule_arrival_times_in_rounds
 // Cost model of time_schedule_trace when it is given none: the defaults of tiopt.qccd.TimingModel and
 // tiopt.qccd.NoiseModel (from P. Murali et al., ISCA 2020), in s rather than µs. A split or merge takes 80 µs, crossing
 // a Y or X junction 100 or 120 µs, and ions move at 20 µm/µs; two-qubit gates follow the FM gate model, and ions reach
-// the end of their chain with SWAP gates where gates can be done. Splits, merges and junction crossings add 0.1 quanta,
+// the end of their chain with a SWAP gate or physical swaps, whichever costs less fidelity, where gates can be done (and
+// with physical swaps elsewhere). Splits, merges and junction crossings add 0.1 quanta,
 // every 100 µm moved 0.01, and every chain and moving ion heats by 100 quanta/s; a two-qubit gate fails with
 // probability 1 µs^-1 times its duration plus A (2 n_bar + 1), where A = 1E-4 N / ln N
 struct TransportCostModel default_transport_cost_model
@@ -471,7 +472,7 @@ struct TransportCostModel default_transport_cost_model
 	cost_model.junction_y = 100E-6;
 	cost_model.junction_x = 120E-6;
 	cost_model.rotation = 42E-6;
-	cost_model.swap_gates = 1;
+	cost_model.swap_gates = SWAP_CHEAPER;
 	cost_model.gate_model = GATE_MODEL_FM;
 	cost_model.two_qubit = GATE_DURATION;
 	cost_model.single_qubit = 5E-6;
@@ -559,6 +560,7 @@ struct ShuttleState
 	double *carried_times; // time up to which each ion out of a chain has been heated (s)
 	double fidelity;
 	double max_n_bar;
+	int *later_gates; // two-qubit (Mølmer-Sørensen) gates which each ion has yet to take part in
 };
 
 // Background heating of the chain in a zone up to a time
@@ -694,6 +696,47 @@ static void remove_from_chain
 	state->chain_lengths[zone]--;
 }
 
+// Whether bringing an ion from one place in the chain of a gate zone to another costs less fidelity with a SWAP gate
+// (three two-qubit gates) than by physically swapping it with each ion on the way. The SWAP gate fails now (at the mean
+// phonon number of the chain), while the quanta which the physical swaps add (and the background heating while either
+// happens) stay in the chain and lower the fidelity of every later two-qubit gate of its ions, counted as if the chain
+// stayed together for them (in a chain of two, which shares its quanta with both of its ions, this is exact)
+static int swap_gate_is_cheaper
+(
+	struct ShuttleState *state,
+	int zone,
+	int position,
+	int target,
+	double t
+)
+{
+	const struct TransportCostModel *cost_model = state->cost_model;
+	int *chain = &state->chains[zone * (state->n_ions + 1)];
+	int n = state->chain_lengths[zone];
+	int distance = abs(target - position);
+
+	// Infidelity of the SWAP gate
+	double n_bar = state->energies[zone] + cost_model->background_heating * MAX(t - state->energy_times[zone], 0.0);
+	double gate = two_qubit_gate_time(cost_model, n, distance);
+	double size = MAX(n, 2);
+	double error = cost_model->gate_background_error * gate + cost_model->motional_error * size / log(size) * (2.0 * n_bar + 1.0);
+	double gate_cost = 1.0 - pow(MAX(1.0 - error, 0.0), 3);
+
+	// Infidelity which each quantum added to the chain causes later, in the later gates of its ions (each between two of
+	// them)
+	int later = 0;
+	for (int k = 0; k < n; k++)
+		later += state->later_gates[chain[k] - 1];
+
+	double per_quantum = 2.0 * cost_model->motional_error * size / log(size) * 0.5 * later;
+
+	double swap_time = cost_model->split + cost_model->rotation + cost_model->merge;
+	double gate_heat = cost_model->background_heating * 3 * gate;
+	double physical_heat = distance * (cost_model->split_heating + cost_model->merge_heating + cost_model->background_heating * swap_time);
+
+	return gate_cost + gate_heat * per_quantum < physical_heat * per_quantum;
+}
+
 // Bring an ion to one end of the chain in its zone (0 for the front and 1 for the back), returning when it is there:
 // with a SWAP gate with the ion at that end in a zone where gates can be done (if the cost model uses them), and
 // otherwise by swapping places with each neighbor on the way (a split, a rotation and a merge each, which heat the
@@ -717,7 +760,11 @@ static double reorder_to_end
 	if (position == target)
 		return t;
 
-	if (cost_model->swap_gates && (state->trap_graph->zone_nodes[zone].zone_type & GATE_ZONE))
+	int gate_swap = 0;
+	if (state->trap_graph->zone_nodes[zone].zone_type & GATE_ZONE)
+		gate_swap = (cost_model->swap_gates == SWAP_CHEAPER) ? swap_gate_is_cheaper(state, zone, position, target, t) : (cost_model->swap_gates == SWAP_GATES);
+
+	if (gate_swap)
 	{
 		// Three Mølmer-Sørensen gates exchange the states of the ion and the one at the end
 		int other = chain[target];
@@ -997,6 +1044,9 @@ static double run_operation
 
 		for (int g = 0; g < n_gates; g++)
 			state->fidelity *= two_qubit_gate_fidelity(state, zone, start + g * duration / n_gates, duration / n_gates);
+
+		for (int t = 0; t < node->n_target_ions; t++)
+			state->later_gates[node->target_ions[t] - 1] -= n_gates;
 	}
 	else if (node->operation_type & QUBIT)
 	{
@@ -1128,6 +1178,15 @@ int time_schedule_trace
 	state.carried_times = calloc(MAX(n_ions, 1), sizeof(double));
 	state.fidelity = 1.0;
 	state.max_n_bar = 0.0;
+	state.later_gates = calloc(MAX(n_ions, 1), sizeof(int));
+
+	for (int i = 0; i < n_nodes; i++)
+	{
+		struct InstructionNode *node = &circuit_graph->instruction_nodes[i];
+		if ((node->operation_type & QUBIT) && node->n_target_ions >= 2)
+			for (int t = 0; t < node->n_target_ions; t++)
+				state.later_gates[node->target_ions[t] - 1] += MAX(node->n_ms_gates, 1);
+	}
 
 	free(trace->operation_n_bars);
 	trace->operation_n_bars = calloc(MAX(n_nodes, 1), sizeof(double));
@@ -1336,6 +1395,7 @@ int time_schedule_trace
 	trace->fidelity = state.fidelity;
 	trace->max_n_bar = state.max_n_bar;
 
+	free(state.later_gates);
 	free(state.carried_times);
 	free(state.carried);
 	free(state.energy_times);

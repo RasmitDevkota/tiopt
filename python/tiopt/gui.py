@@ -3945,7 +3945,7 @@ class SchedulingTab(Tab):
         architecture.entry("grid", "Junctions (rows, columns)", "2, 3")
         architecture.entry("capacity", "Ions per trap", 6)
         architecture.combo("gate_model", "Two-qubit gates", gates.GATE_MODELS, "FM")
-        architecture.combo("swap", "Reordering", ("gate", "ion"), "gate")
+        architecture.combo("swap", "Reordering", ("cheaper", "gate", "ion"), "cheaper")
         architecture.check("recool", "Recool every chain after a merge", False)
         architecture.buttons(("Compile", self.compile_qccd), ("Explore capacities", self.explore_qccd))
         self.architecture = architecture

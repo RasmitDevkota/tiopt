@@ -2610,12 +2610,17 @@ SCHEDULE_STEP_TYPES = ("split", "move", "junction", "merge", "ion swap", "operat
 # Gate models of the transport cost model (enum TransportGateModel in transport.h), as in tiopt.gates.GATE_MODELS
 TRANSPORT_GATE_MODELS = {"fixed": 0, "AM1": 1, "AM2": 2, "PM": 3, "FM": 4}
 
+# Ways of reordering a chain where gates can be done (enum TransportSwapMethod in transport.h), by the swap_type of a
+# tiopt.qccd.TimingModel
+TRANSPORT_SWAP_METHODS = {"ion": 0, "gate": 1, "cheaper": 2}
+
 
 def transport_cost_model(timing=None, noise=None):
     """Cost model of the transport scheduler (TransportCostModelStruct) with the durations of a tiopt.qccd.TimingModel
     and the heating and errors of a tiopt.qccd.NoiseModel (their defaults if None), converted from µs to s. The default
-    cost model of the scheduler is this one with the defaults of both. Reordering with "gate" swaps uses SWAP gates in
-    zones where gates can be done, and swaps ions physically elsewhere.
+    cost model of the scheduler is this one with the defaults of both. In zones where gates can be done, ions reach the
+    end of their chain by a SWAP gate ("gate" swaps), by swapping places physically ("ion" swaps), or by whichever costs
+    the schedule less fidelity ("cheaper", the default), and elsewhere they always swap places physically.
     """
     from . import qccd
 
@@ -2623,11 +2628,13 @@ def transport_cost_model(timing=None, noise=None):
     noise = qccd.NoiseModel() if noise is None else noise
     if timing.gate_model not in TRANSPORT_GATE_MODELS:
         raise ValueError(f"unknown gate model {timing.gate_model!r}; choose from AM1, AM2, PM, FM")
+    if timing.swap_type not in TRANSPORT_SWAP_METHODS:
+        raise ValueError(f"unknown swap type {timing.swap_type!r}; choose from {', '.join(TRANSPORT_SWAP_METHODS)}")
     us = 1e-6
     return TransportCostModelStruct(
         speed=timing.speed / us, min_move=timing.min_move * us, split=timing.split * us, merge=timing.merge * us,
         junction_y=timing.junction_y * us, junction_x=timing.junction_x * us, rotation=timing.rotation * us,
-        swap_gates=int(timing.swap_type == "gate"), gate_model=TRANSPORT_GATE_MODELS[timing.gate_model],
+        swap_gates=TRANSPORT_SWAP_METHODS[timing.swap_type], gate_model=TRANSPORT_GATE_MODELS[timing.gate_model],
         two_qubit=float(constant("GATE_DURATION")), single_qubit=timing.single_qubit * us,
         measurement=timing.measurement * us, cooling=noise.cooling_time * us, split_heating=noise.split_heating,
         merge_heating=noise.merge_heating, junction_heating=noise.junction_heating, move_heating=noise.move_heating,
