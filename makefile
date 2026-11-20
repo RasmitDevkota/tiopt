@@ -44,7 +44,7 @@ INC_DIR = include
 BUILD_DIR = build
 
 # Source files (C)
-LIB_SRC = ti_utils.c experiments.c verlet.c electrodynamics.c io.c transport.c waveforms.c analysis.c traps.c ions.c photonics.c quantum.c circuits.c codesign.c zones.c acceleration.c bindings.c ion_heating/ion_heating.c
+LIB_SRC = ti_utils.c experiments.c verlet.c electrodynamics.c io.c transport.c waveforms.c analysis.c traps.c ions.c photonics.c quantum.c circuits.c schedule_check.c codesign.c zones.c acceleration.c bindings.c ion_heating/ion_heating.c
 C_SRC = $(LIB_SRC) main.c
 
 # Header files (C)

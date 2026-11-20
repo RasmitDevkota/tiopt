@@ -452,40 +452,682 @@ void schedule_arrival_times_in_rounds
 	free(ion_positions);
 }
 
-// Distance between the centers of two zones of a trap graph (µm)
-static double zone_distance
+// Cost model of time_schedule_trace when it is given none: the defaults of tiopt.qccd.TimingModel and
+// tiopt.qccd.NoiseModel (from P. Murali et al., ISCA 2020), in s rather than µs. A split or merge takes 80 µs, crossing
+// a Y or X junction 100 or 120 µs, and ions move at 20 µm/µs; two-qubit gates follow the FM gate model, and ions reach
+// the end of their chain with SWAP gates where gates can be done. Splits, merges and junction crossings add 0.1 quanta,
+// every 100 µm moved 0.01, and every chain and moving ion heats by 100 quanta/s; a two-qubit gate fails with
+// probability 1 µs^-1 times its duration plus A (2 n_bar + 1), where A = 1E-4 N / ln N
+struct TransportCostModel default_transport_cost_model
 (
-	struct TrapGraph *trap_graph,
+)
+{
+	struct TransportCostModel cost_model = { 0 };
+
+	cost_model.speed = 20.0E6;
+	cost_model.min_move = 1E-6;
+	cost_model.split = 80E-6;
+	cost_model.merge = 80E-6;
+	cost_model.junction_y = 100E-6;
+	cost_model.junction_x = 120E-6;
+	cost_model.rotation = 42E-6;
+	cost_model.swap_gates = 1;
+	cost_model.gate_model = GATE_MODEL_FM;
+	cost_model.two_qubit = GATE_DURATION;
+	cost_model.single_qubit = 5E-6;
+	cost_model.measurement = 100E-6;
+	cost_model.cooling = 200E-6;
+	cost_model.split_heating = 0.1;
+	cost_model.merge_heating = 0.1;
+	cost_model.junction_heating = 0.1;
+	cost_model.move_heating = 0.01;
+	cost_model.background_heating = 1E-4 * 1E6;
+	cost_model.gate_background_error = 1E-6 * 1E6;
+	cost_model.motional_error = 1E-4;
+	cost_model.single_qubit_error = 1E-4;
+	cost_model.measurement_error = 1E-3;
+	cost_model.cooled_n_bar = 0.05;
+
+	return cost_model;
+}
+
+// Cost model which only counts the distance ions move: they move at TRANSPORT_SPEED_LIMIT, splits, merges, swaps and
+// junction crossings take no time, operations take GATE_DURATION, DETECTION_DURATION and COOLING_DURATION (as the
+// scheduler used to assume), and nothing heats or fails
+struct TransportCostModel distance_transport_cost_model
+(
+)
+{
+	struct TransportCostModel cost_model = { 0 };
+
+	cost_model.speed = TRANSPORT_SPEED_LIMIT;
+	cost_model.gate_model = GATE_MODEL_FIXED;
+	cost_model.two_qubit = GATE_DURATION;
+	cost_model.single_qubit = GATE_DURATION;
+	cost_model.measurement = DETECTION_DURATION;
+	cost_model.cooling = COOLING_DURATION;
+
+	return cost_model;
+}
+
+// Duration of a two-qubit gate between ions separation apart in a chain of n_ions (s), in the gate model of a cost model
+// (as tiopt.gates.gate_time_model)
+double two_qubit_gate_time
+(
+	const struct TransportCostModel *cost_model,
+	int n_ions,
+	int separation
+)
+{
+	int d = MAX(separation, 1);
+
+	switch (cost_model->gate_model)
+	{
+		case GATE_MODEL_AM1:
+			return 1E-6 * MAX(100.0 * d - 22.0, 1.0);
+		case GATE_MODEL_AM2:
+			return 1E-6 * MAX(38.0 * d + 10.0, 1.0);
+		case GATE_MODEL_PM:
+			return 1E-6 * MAX(5.0 * d + 160.0, 1.0);
+		case GATE_MODEL_FM:
+			return 1E-6 * MAX(13.33 * n_ions - 54.0, 100.0);
+		default:
+			return cost_model->two_qubit;
+	}
+}
+
+// Chains of ions in the zones of a trap graph, and when each zone, segment and ion is next free, while the moves of a
+// schedule are timed
+struct ShuttleState
+{
+	struct TrapGraph *trap_graph;
+	const struct TransportCostModel *cost_model;
+	struct ScheduleTrace *trace;
+	int n_zones;
+	int n_ions;
+	int *chains; // ions in each zone, from the end which faces its first neighbor; implicitly, length n_zones-by-(n_ions+1)
+	int *chain_lengths; // implicitly, length n_zones
+	int *first_neighbors; // neighbor of each zone with the lowest index, which the front of its chain faces (-1 if none)
+	int *degrees; // number of neighbors of each zone
+	double *zone_free; // time from which each zone is free (s)
+	double *segment_free; // time from which each segment is free (s); implicitly, length n_zones-by-n_zones
+	double *ion_free; // time from which each ion is free (s)
+	int *path; // implicitly, length n_zones
+	double *energies; // mean phonon number of the chain in each zone
+	double *energy_times; // time up to which each chain has been heated (s)
+	double *carried; // mean phonon number which each ion carries out of a chain
+	double *carried_times; // time up to which each ion out of a chain has been heated (s)
+	double fidelity;
+	double max_n_bar;
+};
+
+// Background heating of the chain in a zone up to a time
+static void heat_chain
+(
+	struct ShuttleState *state,
+	int zone,
+	double t
+)
+{
+	state->energies[zone] += state->cost_model->background_heating * MAX(t - state->energy_times[zone], 0.0);
+	state->energy_times[zone] = MAX(t, state->energy_times[zone]);
+}
+
+// Background heating of an ion out of a chain up to a time
+static void heat_ion
+(
+	struct ShuttleState *state,
+	int ion,
+	double t
+)
+{
+	state->carried[ion - 1] += state->cost_model->background_heating * MAX(t - state->carried_times[ion - 1], 0.0);
+	state->carried_times[ion - 1] = MAX(t, state->carried_times[ion - 1]);
+}
+
+// Fidelity of a two-qubit gate of a duration in the chain of a zone, as heated up to its start
+static double two_qubit_gate_fidelity
+(
+	struct ShuttleState *state,
+	int zone,
+	double start,
+	double duration
+)
+{
+	const struct TransportCostModel *cost_model = state->cost_model;
+
+	heat_chain(state, zone, start);
+
+	double n = MAX(state->chain_lengths[zone], 2);
+	double n_bar = state->energies[zone];
+	state->max_n_bar = MAX(state->max_n_bar, n_bar);
+
+	return MAX(1.0 - cost_model->gate_background_error * duration - cost_model->motional_error * n / log(n) * (2.0 * n_bar + 1.0), 0.0);
+}
+
+// Record a step of a schedule, returning when it ends
+static double add_transport_step
+(
+	struct ShuttleState *state,
+	enum TransportStepType type,
+	int ion,
+	int other_ion,
+	int zone,
+	int to_zone,
+	int index,
+	double start,
+	double duration
+)
+{
+	struct ScheduleTrace *trace = state->trace;
+
+	if (trace->n_steps == trace->max_steps)
+	{
+		trace->max_steps = MAX(2 * trace->max_steps, 256);
+		trace->steps = realloc(trace->steps, trace->max_steps * sizeof(struct TransportStep));
+	}
+
+	trace->steps[trace->n_steps++] = (struct TransportStep) { type, ion, other_ion, zone, to_zone, index, start, start + duration };
+
+	return start + duration;
+}
+
+// End of the chain in a zone (0 for the front and 1 for the back) which faces one of its neighbors
+static int chain_end_facing
+(
+	struct ShuttleState *state,
+	int zone,
+	int neighbor
+)
+{
+	return (neighbor == state->first_neighbors[zone]) ? 0 : 1;
+}
+
+static int chain_position
+(
+	struct ShuttleState *state,
+	int zone,
+	int ion
+)
+{
+	int *chain = &state->chains[zone * (state->n_ions + 1)];
+	for (int k = 0; k < state->chain_lengths[zone]; k++)
+		if (chain[k] == ion)
+			return k;
+
+	return -1;
+}
+
+static void insert_into_chain
+(
+	struct ShuttleState *state,
+	int zone,
+	int ion,
+	int end
+)
+{
+	int *chain = &state->chains[zone * (state->n_ions + 1)];
+	int n = state->chain_lengths[zone]++;
+
+	if (end == 0)
+	{
+		memmove(&chain[1], &chain[0], n * sizeof(int));
+		chain[0] = ion;
+	}
+	else
+		chain[n] = ion;
+}
+
+static void remove_from_chain
+(
+	struct ShuttleState *state,
+	int zone,
+	int ion
+)
+{
+	int *chain = &state->chains[zone * (state->n_ions + 1)];
+	int k = chain_position(state, zone, ion);
+	if (k < 0)
+		return;
+
+	memmove(&chain[k], &chain[k + 1], (state->chain_lengths[zone] - k - 1) * sizeof(int));
+	state->chain_lengths[zone]--;
+}
+
+// Bring an ion to one end of the chain in its zone (0 for the front and 1 for the back), returning when it is there:
+// with a SWAP gate with the ion at that end in a zone where gates can be done (if the cost model uses them), and
+// otherwise by swapping places with each neighbor on the way (a split, a rotation and a merge each, which heat the
+// chain)
+static double reorder_to_end
+(
+	struct ShuttleState *state,
+	int ion,
+	int zone,
+	int end,
+	int index,
+	double t
+)
+{
+	const struct TransportCostModel *cost_model = state->cost_model;
+	int *chain = &state->chains[zone * (state->n_ions + 1)];
+	int position = chain_position(state, zone, ion);
+	int target = (end == 0) ? 0 : state->chain_lengths[zone] - 1;
+	int step = (target > position) ? 1 : -1;
+
+	if (position == target)
+		return t;
+
+	if (cost_model->swap_gates && (state->trap_graph->zone_nodes[zone].zone_type & GATE_ZONE))
+	{
+		// Three Mølmer-Sørensen gates exchange the states of the ion and the one at the end
+		int other = chain[target];
+		double gate = two_qubit_gate_time(cost_model, state->chain_lengths[zone], abs(target - position));
+		state->fidelity *= pow(two_qubit_gate_fidelity(state, zone, t, gate), 3);
+		t = add_transport_step(state, STEP_GATE_SWAP, ion, other, zone, zone, index, t, 3 * gate);
+
+		chain[target] = ion;
+		chain[position] = other;
+		state->ion_free[other - 1] = MAX(state->ion_free[other - 1], t);
+
+		return t;
+	}
+
+	heat_chain(state, zone, t);
+	state->energies[zone] += abs(target - position) * (cost_model->split_heating + cost_model->merge_heating);
+
+	while (position != target)
+	{
+		int neighbor = chain[position + step];
+		t = add_transport_step(state, STEP_ION_SWAP, ion, neighbor, zone, zone, index, t, cost_model->split + cost_model->rotation + cost_model->merge);
+
+		chain[position + step] = ion;
+		chain[position] = neighbor;
+		position += step;
+	}
+
+	return t;
+}
+
+// Split an ion off the end of the chain in a zone which faces a neighbor (it takes its share of the motional energy of
+// the chain, and the split heats both), or let it go if it is alone, returning when it is free
+static double split_off
+(
+	struct ShuttleState *state,
+	int ion,
+	int zone,
+	int toward,
+	int index,
+	double t
+)
+{
+	const struct TransportCostModel *cost_model = state->cost_model;
+	int n = state->chain_lengths[zone];
+
+	heat_chain(state, zone, t);
+	double share = state->energies[zone] / MAX(n, 1);
+	state->energies[zone] -= share;
+	state->carried[ion - 1] = share;
+	state->carried_times[ion - 1] = t;
+
+	if (n > 1)
+	{
+		t = add_transport_step(state, STEP_SPLIT, ion, 0, zone, toward, index, t, cost_model->split);
+		state->energies[zone] += cost_model->split_heating;
+		state->carried[ion - 1] += cost_model->split_heating;
+	}
+
+	// The ion heats on its own from when it is free
+	state->carried_times[ion - 1] = t;
+	remove_from_chain(state, zone, ion);
+
+	return t;
+}
+
+// Merge an ion into the end of the chain in a zone which faces the neighbor it comes from (adding the motional energy it
+// carries, and the heating of the merge), or let it stay there if the zone is empty, returning when it is done
+static double merge_into
+(
+	struct ShuttleState *state,
+	int ion,
+	int zone,
+	int from,
+	int index,
+	double t
+)
+{
+	const struct TransportCostModel *cost_model = state->cost_model;
+
+	heat_ion(state, ion, t);
+
+	if (state->chain_lengths[zone] > 0)
+	{
+		heat_chain(state, zone, t);
+		t = add_transport_step(state, STEP_MERGE, ion, 0, zone, from, index, t, cost_model->merge);
+		state->energies[zone] += state->carried[ion - 1] + cost_model->merge_heating;
+	}
+	else
+	{
+		state->energies[zone] = state->carried[ion - 1];
+		state->energy_times[zone] = t;
+	}
+
+	state->carried[ion - 1] = 0.0;
+	insert_into_chain(state, zone, ion, chain_end_facing(state, zone, from));
+
+	return t;
+}
+
+// Time of a move along a segment
+static double segment_move_time
+(
+	struct ShuttleState *state,
 	int from_zone,
 	int to_zone
 )
 {
-	double *a = trap_graph->zone_nodes[from_zone].position;
-	double *b = trap_graph->zone_nodes[to_zone].position;
+	double length = state->trap_graph->segment_lengths[from_zone * state->n_zones + to_zone];
 
-	return sqrt(pow(b[0] - a[0], 2) + pow(b[1] - a[1], 2) + pow(b[2] - a[2], 2));
+	return MAX(length / state->cost_model->speed, state->cost_model->min_move);
+}
+
+static int is_junction_zone
+(
+	struct ShuttleState *state,
+	int zone
+)
+{
+	return (state->trap_graph->zone_nodes[zone].zone_type & JUNCTION_ZONE) != 0;
+}
+
+// Carry out a move of a schedule trace along the shortest path between its zones, no earlier than a time, returning 1
+// if there is no path. The ion first comes to the end of the chain in its zone which faces the way it goes, and splits
+// off it if other ions are there; then it moves along each segment of the path, crosses each junction, and passes
+// through the chain of every other zone which holds ions (merging into it, swapping its way to the far end, and
+// splitting off again), and finally merges into the chain in its destination. One ion at a time moves along a segment,
+// and an ion takes up the zone it moves toward from when it sets off until it leaves it (or has merged into the chain
+// there), so that moving ions are always at least a segment apart and never pass each other
+static int shuttle_ion
+(
+	struct ShuttleState *state,
+	int m,
+	double start
+)
+{
+	struct IonMove *move = &state->trace->moves[m];
+	const struct TransportCostModel *cost_model = state->cost_model;
+	int n = state->n_zones;
+	int ion = move->ion;
+	int from = move->from_zone;
+	int to = move->to_zone;
+
+	double t = MAX(start, state->ion_free[ion - 1]);
+
+	if (from == to)
+	{
+		move->depart = move->arrive = t;
+		state->ion_free[ion - 1] = t;
+		return 0;
+	}
+
+	int n_path = trap_graph_route(state->trap_graph, from, to, state->path);
+	if (n_path < 2)
+	{
+		printf("ERROR: No path between zones %d and %d for ion %d\n", from + 1, to + 1, ion);
+		return 1;
+	}
+
+	int *path = state->path;
+
+	if (chain_position(state, from, ion) < 0)
+	{
+		printf("ERROR: Ion %d is not in zone %d when it moves from there\n", ion, from + 1);
+		return 1;
+	}
+
+	// Leave the chain in the first zone
+	t = MAX(t, state->zone_free[from]);
+	move->depart = t;
+
+	if (state->chain_lengths[from] > 1)
+		t = reorder_to_end(state, ion, from, chain_end_facing(state, from, path[1]), m, t);
+	t = split_off(state, ion, from, path[1], m, t);
+
+	for (int k = 1; k < n_path; k++)
+	{
+		int a = path[k - 1];
+		int b = path[k];
+
+		// Set off once the segment and the zone it leads to are free, giving up the zone it leaves
+		double s = MAX(t, MAX(state->segment_free[a * n + b], state->zone_free[b]));
+		state->zone_free[a] = MAX(state->zone_free[a], s);
+
+		// The ion heats while it waits and moves, and by the distance it moves
+		heat_ion(state, ion, s);
+		t = add_transport_step(state, STEP_MOVE, ion, 0, a, b, m, s, segment_move_time(state, a, b));
+		state->segment_free[a * n + b] = state->segment_free[b * n + a] = t;
+		heat_ion(state, ion, t);
+		state->carried[ion - 1] += cost_model->move_heating * state->trap_graph->segment_lengths[a * n + b] / 100.0;
+
+		if (is_junction_zone(state, b))
+		{
+			if (k == n_path - 1)
+			{
+				printf("ERROR: Ion %d cannot stay in junction zone %d\n", ion, b + 1);
+				return 1;
+			}
+
+			if (state->degrees[b] >= 3)
+			{
+				t = add_transport_step(state, STEP_JUNCTION, ion, 0, b, b, m, t, (state->degrees[b] == 3) ? cost_model->junction_y : cost_model->junction_x);
+				state->carried[ion - 1] += cost_model->junction_heating;
+			}
+
+			continue;
+		}
+
+		int occupied = (state->chain_lengths[b] > 0);
+
+		if (k == n_path - 1)
+		{
+			// Merge into the chain in the destination
+			t = merge_into(state, ion, b, a, m, t);
+			state->zone_free[b] = MAX(state->zone_free[b], t);
+		}
+		else if (occupied)
+		{
+			// Pass through the chain in this zone
+			int next = path[k + 1];
+
+			t = merge_into(state, ion, b, a, m, t);
+			t = reorder_to_end(state, ion, b, chain_end_facing(state, b, next), m, t);
+			t = split_off(state, ion, b, next, m, t);
+		}
+	}
+
+	move->arrive = t;
+	state->ion_free[ion - 1] = t;
+
+	return 0;
+}
+
+// Duration of an operation which starts at a time on the chain in a zone (s), multiplying the fidelity of the schedule by
+// its own: a gate on several ions takes its Mølmer-Sørensen gates one after another, each lasting as long as the gate
+// model gives for the chain and how far apart its ions are in it, and failing as two_qubit_gate_fidelity gives; a
+// single-qubit gate takes single_qubit (or no time if it is virtual), a measurement measurement for every ion, and
+// cooling brings the chain to cooled_n_bar. An operation whose duration is set takes that long
+static double run_operation
+(
+	struct ShuttleState *state,
+	struct InstructionNode *node,
+	int zone,
+	double start
+)
+{
+	const struct TransportCostModel *cost_model = state->cost_model;
+	double duration;
+
+	if ((node->operation_type & QUBIT) && node->n_target_ions >= 2)
+	{
+		int first = state->n_ions;
+		int last = 0;
+		for (int t = 0; t < node->n_target_ions; t++)
+		{
+			int position = chain_position(state, zone, node->target_ions[t]);
+			first = MIN(first, position);
+			last = MAX(last, position);
+		}
+
+		double gate = two_qubit_gate_time(cost_model, state->chain_lengths[zone], last - first);
+		int n_gates = MAX(node->n_ms_gates, 1);
+		duration = (node->operation_duration > 0.0) ? node->operation_duration : n_gates * gate;
+
+		for (int g = 0; g < n_gates; g++)
+			state->fidelity *= two_qubit_gate_fidelity(state, zone, start + g * duration / n_gates, duration / n_gates);
+	}
+	else if (node->operation_type & QUBIT)
+	{
+		duration = node->virtual_gate ? 0.0 : cost_model->single_qubit;
+		if (!node->virtual_gate)
+			state->fidelity *= 1.0 - cost_model->single_qubit_error;
+	}
+	else if (node->operation_type & DETECT)
+	{
+		duration = cost_model->measurement;
+		state->fidelity *= pow(1.0 - cost_model->measurement_error, node->n_target_ions);
+	}
+	else if (node->operation_type & COOL)
+	{
+		duration = cost_model->cooling;
+		state->energies[zone] = cost_model->cooled_n_bar;
+		state->energy_times[zone] = start + duration;
+	}
+	else
+		duration = 0.0;
+
+	if (node->operation_duration > 0.0)
+		duration = node->operation_duration;
+
+	return duration;
+}
+
+// Whether the moves of a round which are not done yet fit in the zones one after another in the order of the trace,
+// starting from the chains as they are (after making move first, if it is not -1), so that no zone ever holds more
+// ions than its capacity between moves
+static int round_moves_fit
+(
+	struct ShuttleState *state,
+	int *round_moves,
+	int n_round_moves,
+	int *done,
+	int first,
+	int *counts
+)
+{
+	struct ZoneNode *zones = state->trap_graph->zone_nodes;
+	memcpy(counts, state->chain_lengths, state->n_zones * sizeof(int));
+
+	for (int k = -1; k < n_round_moves; k++)
+	{
+		int m = (k < 0) ? first : round_moves[k];
+		if (m < 0 || (k >= 0 && (done[m] || m == first)))
+			continue;
+
+		struct IonMove *move = &state->trace->moves[m];
+		if (move->from_zone == move->to_zone)
+			continue;
+
+		if (counts[move->to_zone] + 1 > zones[move->to_zone].zone_capacity)
+			return 0;
+
+		counts[move->to_zone]++;
+		counts[move->from_zone]--;
+	}
+
+	return 1;
 }
 
 // Time every move of a schedule trace (whose transport_rounds and n_rounds are set) and the arrival time of every
-// transport of its program, at TRANSPORT_SPEED_LIMIT: each round first moves ions back into storage (an ion's moves one
-// after another, different ions at once), then moves the ions of its operations into their zones (all at once, from
-// where they actually are), and then runs its operations, which all start once the slowest transport has arrived and
-// last as long as the slowest one. A move back into storage belongs to the round of the next transport after it in the
-// trace, and those after the last transport happen once the last round is done
-void time_schedule_trace
+// transport of its program, carrying out each move along the segments of the trap graph (see shuttle_ion) with the
+// durations of a cost model (or of default_transport_cost_model if it is NULL), and recording every step in the trace.
+// Each round first moves ions back into storage, then moves the ions of its operations into their zones (each time the
+// ions which pass through the fewest chains first, then those at the end of their chain, and then the longest moves),
+// keeping the moves of each
+// ion in the order of the trace and never taking a move out of order if that would leave the rest without room in the
+// zones, and then runs its operations, which all start once every ion of the round has arrived and their zones are free, and last as long as the
+// slowest one. A move back into storage belongs to the round of the next transport after it in the trace, and those
+// after the last transport happen once the last round is done. Moves wait for each other only where they share a
+// segment or a zone, so a round lasts at least as long as when every ion moves at once along a straight line. Returns 1
+// if a move has no path
+int time_schedule_trace
 (
 	struct TrapGraph *trap_graph,
 	struct CircuitGraph *circuit_graph,
 	struct TransportProgram *transport_program,
-	struct ScheduleTrace *trace
+	struct ScheduleTrace *trace,
+	const struct TransportCostModel *cost_model
 )
 {
+	struct TransportCostModel default_cost_model = default_transport_cost_model();
+	if (cost_model == NULL)
+		cost_model = &default_cost_model;
+
+	if (trap_graph_routes(trap_graph) != 0)
+		return 1;
+
 	int n_ions = transport_program->n_ions;
+	int n_zones = trap_graph->n_zones;
 	int n_rounds = trace->n_rounds;
 	int *rounds = trace->transport_rounds;
 
 	int n_moves = trace->n_moves;
 	int n_nodes = circuit_graph->n_instruction_nodes;
+
+	// Zone of each ion before the first move, which is recorded in the trace if the scheduler did not
+	if (trace->initial_zones == NULL || trace->n_ions != n_ions)
+	{
+		free(trace->initial_zones);
+		trace->n_ions = n_ions;
+		trace->initial_zones = malloc(MAX(n_ions, 1) * sizeof(int));
+
+		for (int i = 0; i < n_ions; i++)
+		{
+			trace->initial_zones[i] = 0;
+			for (int z = 0; z < n_zones; z++)
+				if (memcmp(trap_graph->zone_nodes[z].position, transport_program->initial_positions[i], sizeof(double[3])) == 0)
+					trace->initial_zones[i] = z;
+		}
+	}
+
+	trace->n_steps = 0;
+
+	struct ShuttleState state = { trap_graph, cost_model, trace, n_zones, n_ions };
+	state.chains = malloc(MAX(n_zones * (n_ions + 1), 1) * sizeof(int));
+	state.chain_lengths = calloc(MAX(n_zones, 1), sizeof(int));
+	state.first_neighbors = malloc(MAX(n_zones, 1) * sizeof(int));
+	state.degrees = malloc(MAX(n_zones, 1) * sizeof(int));
+	state.zone_free = calloc(MAX(n_zones, 1), sizeof(double));
+	state.segment_free = calloc(MAX(n_zones * n_zones, 1), sizeof(double));
+	state.ion_free = calloc(MAX(n_ions, 1), sizeof(double));
+	state.path = malloc(MAX(n_zones, 1) * sizeof(int));
+	state.energies = calloc(MAX(n_zones, 1), sizeof(double));
+	state.energy_times = calloc(MAX(n_zones, 1), sizeof(double));
+	state.carried = calloc(MAX(n_ions, 1), sizeof(double));
+	state.carried_times = calloc(MAX(n_ions, 1), sizeof(double));
+	state.fidelity = 1.0;
+	state.max_n_bar = 0.0;
+
+	free(trace->operation_n_bars);
+	trace->operation_n_bars = calloc(MAX(n_nodes, 1), sizeof(double));
+
+	for (int z = 0; z < n_zones; z++)
+	{
+		state.degrees[z] = trap_graph_neighbors(trap_graph, z, state.path);
+		state.first_neighbors[z] = (state.degrees[z] > 0) ? state.path[0] : -1;
+	}
+
+	// Chains start out in the order of the ions
+	for (int i = 0; i < n_ions; i++)
+		insert_into_chain(&state, trace->initial_zones[i], i + 1, 1);
 
 	// Round of every move
 	int *move_rounds = malloc(MAX(n_moves, 1) * sizeof(int));
@@ -521,69 +1163,415 @@ void time_schedule_trace
 	for (int i = 0; i < n_nodes; i++)
 		round_nodes[next[rounds[i]]++] = i;
 
-	// When each ion is free to make its next move back into storage in the round it last moved in
-	double *ion_times = malloc(MAX(n_ions, 1) * sizeof(double));
-	int *ion_rounds = calloc(MAX(n_ions, 1), sizeof(int));
+	// Zone of each operation, where its ions go
+	int *op_zones = malloc(MAX(n_nodes, 1) * sizeof(int));
+	for (int i = 0; i < n_nodes; i++)
+		op_zones[i] = -1;
+	for (int m = 0; m < n_moves; m++)
+		if (trace->moves[m].transport >= 0)
+			op_zones[trace->moves[m].transport] = trace->moves[m].to_zone;
+
+	// Previous move of the ion of each move, which must be done first
+	int *previous_moves = malloc(MAX(n_moves, 1) * sizeof(int));
+	int *last_moves = malloc(MAX(n_ions, 1) * sizeof(int));
+	for (int i = 0; i < n_ions; i++)
+		last_moves[i] = -1;
+	for (int m = 0; m < n_moves; m++)
+	{
+		previous_moves[m] = last_moves[trace->moves[m].ion - 1];
+		last_moves[trace->moves[m].ion - 1] = m;
+	}
+
+	int *done = calloc(MAX(n_moves, 1), sizeof(int));
+	int *counts = malloc(MAX(n_zones, 1) * sizeof(int));
+	int status = 0;
 
 	double time = 0.0;
-	for (int round = 1; round <= n_rounds + 1; round++)
+	for (int round = 1; round <= n_rounds + 1 && status == 0; round++)
 	{
-		// Moves back into storage
-		double transport_start = time;
-		for (int k = move_starts[round]; k < move_starts[round + 1]; k++)
-		{
-			struct IonMove *move = &trace->moves[round_moves[k]];
-			if (move->transport >= 0)
-				continue;
+		double round_end = time;
 
-			int ion = move->ion - 1;
-			if (ion_rounds[ion] != round)
+		// Moves of the round, each ion's in the order of the trace: moves back into storage first, then moves into the
+		// zones of the operations, where among each the ion which would pass through the fewest chains on its way goes
+		// first, then the one which needs the fewest swaps to reach the end of its chain, and then the one with the
+		// longest way to go (so that it leads the others), as long as the zones have room
+		int *moves_of_round = &round_moves[move_starts[round]];
+		int n_moves_of_round = move_starts[round + 1] - move_starts[round];
+
+		for (;;)
+		{
+			int best = -1;
+			int best_transport = 0;
+			int best_passes = 0;
+			int best_swaps = 0;
+			double best_length = 0.0;
+			int first = -1;
+
+			// If the rest of the round fits in the order of the trace (as the scheduler made it), a move may only go
+			// first if the rest still fits after it; otherwise its destination needs room for it
+			int fits_in_order = round_moves_fit(&state, moves_of_round, n_moves_of_round, done, -1, counts);
+
+			for (int k = move_starts[round]; k < move_starts[round + 1]; k++)
 			{
-				ion_rounds[ion] = round;
-				ion_times[ion] = time;
+				int m = round_moves[k];
+				struct IonMove *move = &trace->moves[m];
+				if (done[m] || (previous_moves[m] >= 0 && !done[previous_moves[m]]))
+					continue;
+
+				if (first < 0)
+					first = m;
+
+				if (move->from_zone != move->to_zone)
+				{
+					if (fits_in_order ? !round_moves_fit(&state, moves_of_round, n_moves_of_round, done, m, counts) :
+						state.chain_lengths[move->to_zone] >= trap_graph->zone_nodes[move->to_zone].zone_capacity)
+						continue;
+				}
+
+				// Chains the ion would pass through, and swaps it needs to leave its own
+				int transport = (move->transport >= 0);
+				int passes = 0;
+				int swaps = 0;
+				double length = 0.0;
+				int n_path = (move->from_zone != move->to_zone) ? trap_graph_route(trap_graph, move->from_zone, move->to_zone, state.path) : 0;
+				if (n_path >= 2)
+				{
+					int position = chain_position(&state, move->from_zone, move->ion);
+					if (position >= 0)
+						swaps = (chain_end_facing(&state, move->from_zone, state.path[1]) == 0) ? position : state.chain_lengths[move->from_zone] - 1 - position;
+
+					for (int p = 1; p < n_path - 1; p++)
+						passes += (state.chain_lengths[state.path[p]] > 0);
+
+					length = trap_graph_distance(trap_graph, move->from_zone, move->to_zone);
+				}
+
+				if (best < 0 || transport < best_transport || (transport == best_transport && (passes < best_passes ||
+					(passes == best_passes && (swaps < best_swaps || (swaps == best_swaps && length > best_length))))))
+				{
+					best = m;
+					best_transport = transport;
+					best_passes = passes;
+					best_swaps = swaps;
+					best_length = length;
+				}
 			}
 
-			move->depart = ion_times[ion];
-			move->arrive = move->depart + zone_distance(trap_graph, move->from_zone, move->to_zone) / TRANSPORT_SPEED_LIMIT;
-			ion_times[ion] = move->arrive;
-			transport_start = MAX(transport_start, move->arrive);
+			// Every move waiting for room: take them in order
+			if (best < 0)
+				best = first;
+
+			if (best < 0)
+				break;
+
+			done[best] = 1;
+			status = shuttle_ion(&state, best, time);
+			round_end = MAX(round_end, trace->moves[best].arrive);
+
+			if (status != 0)
+				break;
 		}
 
-		// Moves into the zones of the operations
-		double max_transport = 0.0;
-		for (int k = move_starts[round]; k < move_starts[round + 1]; k++)
+		if (status != 0)
+			break;
+
+		// Operations, which start together once their ions have arrived and their zones are free
+		double op_start = round_end;
+		for (int k = node_starts[round]; k < node_starts[round + 1]; k++)
 		{
-			struct IonMove *move = &trace->moves[round_moves[k]];
-			if (move->transport < 0)
-				continue;
-
-			double duration = zone_distance(trap_graph, move->from_zone, move->to_zone) / TRANSPORT_SPEED_LIMIT;
-			move->depart = transport_start;
-			move->arrive = transport_start + duration;
-			max_transport = MAX(max_transport, duration);
+			int zone = op_zones[round_nodes[k]];
+			if (zone >= 0)
+				op_start = MAX(op_start, state.zone_free[zone]);
 		}
 
-		// Operations
-		double max_duration = 0.0;
 		for (int k = node_starts[round]; k < node_starts[round + 1]; k++)
 		{
 			int i = round_nodes[k];
+			struct InstructionNode *node = &circuit_graph->instruction_nodes[i];
+			int zone = MAX(op_zones[i], 0);
 
-			transport_program->arrival_times[i] = transport_start + max_transport;
-			max_duration = MAX(max_duration, operation_duration(&circuit_graph->instruction_nodes[i]));
+			heat_chain(&state, zone, op_start);
+			trace->operation_n_bars[i] = state.energies[zone];
+
+			double duration = run_operation(&state, node, zone, op_start);
+			double end = add_transport_step(&state, STEP_OPERATION, 0, 0, zone, zone, i, op_start, duration);
+			transport_program->arrival_times[i] = op_start;
+
+			state.zone_free[zone] = MAX(state.zone_free[zone], end);
+			for (int t = 0; t < node->n_target_ions; t++)
+				state.ion_free[node->target_ions[t] - 1] = MAX(state.ion_free[node->target_ions[t] - 1], end);
+
+			round_end = MAX(round_end, end);
 		}
 
-		time = transport_start + max_transport + max_duration;
+		time = round_end;
 	}
 
-	free(ion_rounds);
-	free(ion_times);
+	free(counts);
+	free(done);
+	free(last_moves);
+	free(previous_moves);
+	free(op_zones);
 	free(next);
 	free(round_nodes);
 	free(round_moves);
 	free(node_starts);
 	free(move_starts);
 	free(move_rounds);
+	trace->fidelity = state.fidelity;
+	trace->max_n_bar = state.max_n_bar;
+
+	free(state.carried_times);
+	free(state.carried);
+	free(state.energy_times);
+	free(state.energies);
+	free(state.path);
+	free(state.ion_free);
+	free(state.segment_free);
+	free(state.zone_free);
+	free(state.degrees);
+	free(state.first_neighbors);
+	free(state.chain_lengths);
+	free(state.chains);
+
+	return status;
+}
+
+// Generate a trap graph of zones at the given positions, joined by segments between pairs of zones (of the given
+// lengths in µm, or of the distance between the centers of the zones if segment_lengths is NULL or a length is 0)
+void generate_trap_graph
+(
+	int n_zones,
+	enum ZoneType *zone_types,
+	int *zone_capacities,
+	double (*positions)[3],
+	int n_segments,
+	int (*segments)[2],
+	double *segment_lengths,
+	struct TrapGraph *trap_graph
+)
+{
+	*trap_graph = (struct TrapGraph) { 0 };
+	trap_graph->n_zones = n_zones;
+	trap_graph->n_transport_edges = n_segments;
+	trap_graph->zone_nodes = calloc(MAX(n_zones, 1), sizeof(struct ZoneNode));
+	trap_graph->transport_edges = calloc(MAX(n_segments, 1), sizeof(struct TransportEdge));
+
+	for (int z = 0; z < n_zones; z++)
+	{
+		struct ZoneNode *zone = &trap_graph->zone_nodes[z];
+
+		zone->zone_type = zone_types[z];
+		zone->zone_capacity = zone_capacities[z];
+		zone->zone_occupancy = 0;
+		memcpy(zone->position, positions[z], sizeof(double[3]));
+	}
+
+	// Junctions join their segments at their center
+	int *degrees = calloc(MAX(n_zones, 1), sizeof(int));
+	for (int s = 0; s < n_segments; s++)
+	{
+		degrees[segments[s][0]]++;
+		degrees[segments[s][1]]++;
+	}
+
+	for (int s = 0; s < n_segments; s++)
+	{
+		struct TransportEdge *edge = &trap_graph->transport_edges[s];
+		int a = segments[s][0];
+		int b = segments[s][1];
+
+		int degree = 0;
+		if (zone_types[a] & JUNCTION_ZONE)
+			degree = MAX(degree, degrees[a]);
+		if (zone_types[b] & JUNCTION_ZONE)
+			degree = MAX(degree, degrees[b]);
+
+		edge->edge_type = (degree >= 4) ? FOUR_WAY_JUNCTION_SEGMENT : (degree == 3) ? THREE_WAY_JUNCTION_SEGMENT : LINEAR_SEGMENT;
+		edge->n_zones = 2;
+		edge->zone_nodes = malloc(2 * sizeof(struct ZoneNode));
+		edge->zone_nodes[0] = trap_graph->zone_nodes[a];
+		edge->zone_nodes[1] = trap_graph->zone_nodes[b];
+		edge->length = (segment_lengths != NULL) ? segment_lengths[s] : 0.0;
+	}
+
+	free(degrees);
+}
+
+// Zone of a trap graph at the position of a copy of one of its zones, or -1 if there is none
+static int find_graph_zone
+(
+	struct TrapGraph *trap_graph,
+	struct ZoneNode *zone
+)
+{
+	for (int z = 0; z < trap_graph->n_zones; z++)
+		if (memcmp(trap_graph->zone_nodes[z].position, zone->position, sizeof(double[3])) == 0)
+			return z;
+
+	return -1;
+}
+
+// Find the segments between the zones of a trap graph (each transport edge joins each of its zones to the next) and the
+// shortest path along them between every pair of zones, unless they are already known; returns 1 if a transport edge
+// has a zone which is not in the graph
+int trap_graph_routes
+(
+	struct TrapGraph *trap_graph
+)
+{
+	if (trap_graph->route_lengths != NULL)
+		return 0;
+
+	int n = trap_graph->n_zones;
+	double *segment_lengths = malloc(MAX(n * n, 1) * sizeof(double));
+	double *lengths = malloc(MAX(n * n, 1) * sizeof(double));
+	int *next = malloc(MAX(n * n, 1) * sizeof(int));
+
+	for (int k = 0; k < n * n; k++)
+		segment_lengths[k] = -1.0;
+
+	for (int e = 0; e < trap_graph->n_transport_edges; e++)
+	{
+		struct TransportEdge *edge = &trap_graph->transport_edges[e];
+
+		for (int k = 0; k + 1 < edge->n_zones; k++)
+		{
+			int a = find_graph_zone(trap_graph, &edge->zone_nodes[k]);
+			int b = find_graph_zone(trap_graph, &edge->zone_nodes[k + 1]);
+
+			if (a < 0 || b < 0)
+			{
+				printf("ERROR: Transport edge %d joins a zone which is not in the trap graph\n", e + 1);
+				free(segment_lengths);
+				free(lengths);
+				free(next);
+				return 1;
+			}
+
+			if (a == b)
+				continue;
+
+			double *p = trap_graph->zone_nodes[a].position;
+			double *q = trap_graph->zone_nodes[b].position;
+			double length = (edge->length > 0.0) ? edge->length : sqrt(pow(q[0] - p[0], 2) + pow(q[1] - p[1], 2) + pow(q[2] - p[2], 2));
+
+			if (segment_lengths[a * n + b] < 0.0 || length < segment_lengths[a * n + b])
+				segment_lengths[a * n + b] = segment_lengths[b * n + a] = length;
+		}
+	}
+
+	// Shortest paths (Floyd-Warshall), keeping the first path found among those of the same length
+	for (int a = 0; a < n; a++)
+		for (int b = 0; b < n; b++)
+		{
+			int k = a * n + b;
+
+			if (a == b)
+			{
+				lengths[k] = 0.0;
+				next[k] = b;
+			}
+			else if (segment_lengths[k] >= 0.0)
+			{
+				lengths[k] = segment_lengths[k];
+				next[k] = b;
+			}
+			else
+			{
+				lengths[k] = HUGE_VAL;
+				next[k] = -1;
+			}
+		}
+
+	for (int c = 0; c < n; c++)
+		for (int a = 0; a < n; a++)
+		{
+			if (lengths[a * n + c] == HUGE_VAL)
+				continue;
+
+			for (int b = 0; b < n; b++)
+			{
+				double length = lengths[a * n + c] + lengths[c * n + b];
+
+				if (length < lengths[a * n + b] * (1.0 - 1E-12))
+				{
+					lengths[a * n + b] = length;
+					next[a * n + b] = next[a * n + c];
+				}
+			}
+		}
+
+	trap_graph->segment_lengths = segment_lengths;
+	trap_graph->route_lengths = lengths;
+	trap_graph->route_next = next;
+
+	return 0;
+}
+
+// Shortest distance along the segments of a trap graph between two of its zones (µm), or HUGE_VAL if there is no path
+double trap_graph_distance
+(
+	struct TrapGraph *trap_graph,
+	int from_zone,
+	int to_zone
+)
+{
+	if (trap_graph_routes(trap_graph) != 0)
+		return HUGE_VAL;
+
+	return trap_graph->route_lengths[from_zone * trap_graph->n_zones + to_zone];
+}
+
+// Fill path (of length at least n_zones) with the zones of the shortest path between two zones of a trap graph, from the
+// first to the last, returning their number, or 0 if there is no path
+int trap_graph_route
+(
+	struct TrapGraph *trap_graph,
+	int from_zone,
+	int to_zone,
+	int *path
+)
+{
+	if (trap_graph_routes(trap_graph) != 0)
+		return 0;
+
+	int n = trap_graph->n_zones;
+	if (trap_graph->route_next[from_zone * n + to_zone] < 0)
+		return 0;
+
+	int n_path = 0;
+	int zone = from_zone;
+	path[n_path++] = zone;
+
+	while (zone != to_zone && n_path < n)
+	{
+		zone = trap_graph->route_next[zone * n + to_zone];
+		path[n_path++] = zone;
+	}
+
+	return n_path;
+}
+
+// Fill neighbors (of length at least n_zones) with the zones joined to a zone of a trap graph by a segment, in order,
+// returning their number
+int trap_graph_neighbors
+(
+	struct TrapGraph *trap_graph,
+	int zone,
+	int *neighbors
+)
+{
+	if (trap_graph_routes(trap_graph) != 0)
+		return 0;
+
+	int n = trap_graph->n_zones;
+	int n_neighbors = 0;
+	for (int z = 0; z < n; z++)
+		if (trap_graph->segment_lengths[zone * n + z] >= 0.0)
+			neighbors[n_neighbors++] = z;
+
+	return n_neighbors;
 }
 
 // Generate a trap graph of zones evenly spaced along the trap axis at the given height, connected in a line
@@ -598,6 +1586,7 @@ void generate_linear_trap_graph
 	struct TrapGraph *trap_graph
 )
 {
+	*trap_graph = (struct TrapGraph) { 0 };
 	trap_graph->n_zones = n_zones;
 	trap_graph->n_transport_edges = MAX(n_zones - 1, 0);
 	trap_graph->zone_nodes = calloc(n_zones, sizeof(struct ZoneNode));
@@ -638,7 +1627,13 @@ void free_trap_graph
 
 	free(trap_graph->transport_edges);
 	free(trap_graph->zone_nodes);
+	free(trap_graph->segment_lengths);
+	free(trap_graph->route_lengths);
+	free(trap_graph->route_next);
 
+	trap_graph->segment_lengths = NULL;
+	trap_graph->route_lengths = NULL;
+	trap_graph->route_next = NULL;
 	trap_graph->n_zones = 0;
 	trap_graph->n_transport_edges = 0;
 	trap_graph->zone_nodes = NULL;
@@ -686,8 +1681,9 @@ void free_transport_program
 }
 
 // Find the zone of a trap graph with any of the given types which has room for the target ions of an operation and
-// lies nearest to them (counting targets already in a zone as making room in it), or NULL if there is none; ion_states
-// holds the zone of each ion, and targets start at 1
+// lies nearest to them along its segments (the one whose farthest target is nearest, and then whose targets are nearest
+// in all, which on a line is the zone nearest the middle of two targets), counting targets already in a zone as making
+// room in it, or NULL if there is none; ion_states holds the zone of each ion, and targets start at 1
 struct ZoneNode* select_operation_zone
 (
 	struct TrapGraph *trap_graph,
@@ -697,14 +1693,9 @@ struct ZoneNode* select_operation_zone
 	int n_targets
 )
 {
-	// Centroid of the target ions
-	double centroid[3] = { 0.0, 0.0, 0.0 };
-	for (int t = 0; t < n_targets; t++)
-		for (int k = 0; k < 3; k++)
-			centroid[k] += ion_states[targets[t] - 1]->position[k] / n_targets;
-
 	struct ZoneNode *nearest = NULL;
 	double nearest_distance = HUGE_VAL;
+	double nearest_sum = HUGE_VAL;
 	for (int z = 0; z < trap_graph->n_zones; z++)
 	{
 		struct ZoneNode *zone = &trap_graph->zone_nodes[z];
@@ -719,16 +1710,23 @@ struct ZoneNode* select_operation_zone
 		if (zone->zone_occupancy - n_present + n_targets > zone->zone_capacity)
 			continue;
 
-		// Squared distances, which order the zones the same way
-		double dx = zone->position[0] - centroid[0];
-		double dy = zone->position[1] - centroid[1];
-		double dz = zone->position[2] - centroid[2];
-		double distance = dx * dx + dy * dy + dz * dz;
+		double distance = 0.0;
+		double sum = 0.0;
+		for (int t = 0; t < n_targets; t++)
+		{
+			double d = trap_graph_distance(trap_graph, (int) (ion_states[targets[t] - 1] - trap_graph->zone_nodes), z);
+			distance = MAX(distance, d);
+			sum += d;
+		}
 
-		if (distance < nearest_distance)
+		if (distance == HUGE_VAL)
+			continue;
+
+		if (distance < nearest_distance || (distance == nearest_distance && sum < nearest_sum))
 		{
 			nearest = zone;
 			nearest_distance = distance;
+			nearest_sum = sum;
 		}
 	}
 

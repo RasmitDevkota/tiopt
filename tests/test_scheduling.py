@@ -34,7 +34,8 @@ def test_transport_schedule(circuit):
     trap_graph = tiopt.TrapGraph(ZONES, CAPACITIES, -150.0, 150.0)
     np.testing.assert_allclose(trap_graph.positions[:, 0], np.linspace(-150, 150, 7))
 
-    program = tiopt.TransportProgram(trap_graph, circuit)
+    # Times only count distance here
+    program = tiopt.TransportProgram(trap_graph, circuit, cost_model=tiopt.distance_cost_model())
     assert (program.n_ions, program.n_transports) == (4, 11)
     np.testing.assert_allclose(program.initial_positions[:, 0], -150.0)
     # Gates happen in the gate zone and the measurement in the measure zone
@@ -52,7 +53,8 @@ def test_transport_schedule(circuit):
         if layers[rounds == r][0] < 5:
             assert n_targets[rounds == r].sum() <= 2
     assert np.all(np.diff(times) >= 0)
-    assert times[0] == pytest.approx(200.0 / tiopt.TRANSPORT_SPEED_LIMIT)
+    # The first two ions leave the load zone one 50 µm segment apart, so the second arrives 250 µm of transport in
+    assert times[0] == pytest.approx(250.0 / tiopt.TRANSPORT_SPEED_LIMIT)
 
 
 def test_schedule_without_measure_zone_fails(circuit):
@@ -84,7 +86,8 @@ def test_waveform_for_schedule(solved_trap, ion, circuit):
 
 def test_program_times_every_move(circuit):
     trap_graph = tiopt.TrapGraph(ZONES, CAPACITIES, -150.0, 150.0)
-    program = tiopt.TransportProgram(trap_graph, circuit, "rounds")
+    # Times only count distance here
+    program = tiopt.TransportProgram(trap_graph, circuit, "rounds", cost_model=tiopt.distance_cost_model())
     moves = program.moves
     assert program.n_rounds == 9
     np.testing.assert_array_equal(np.unique(program.rounds), np.arange(1, 10))
@@ -92,10 +95,22 @@ def test_program_times_every_move(circuit):
     releases = [m for m in moves if m.transport < 0]
     assert releases and all(m.arrive > m.depart for m in releases)
     for move in moves:
+        # A move can wait for segments and zones which other ions use, so it takes at least its distance
         distance = abs(trap_graph.positions[move.to_zone, 0] - trap_graph.positions[move.from_zone, 0])
-        assert move.arrive - move.depart == pytest.approx(distance / tiopt.TRANSPORT_SPEED_LIMIT)
+        assert move.arrive - move.depart >= distance / tiopt.TRANSPORT_SPEED_LIMIT - 1e-12
         if move.transport >= 0:
             assert move.arrive <= program.arrival_times[move.transport] + 1e-12
+    # Every step of a move lies within it, and moving along a 50 µm segment takes 50 µm at the speed limit
+    for step in program.steps:
+        if step.type == "operation":
+            assert step.start == pytest.approx(program.arrival_times[step.index])
+            continue
+        move = moves[step.index]
+        assert step.ion == move.ion and move.depart - 1e-12 <= step.start <= step.end <= move.arrive + 1e-12
+        if step.type == "move":
+            assert abs(step.to_zone - step.zone) == 1
+            assert step.end - step.start == pytest.approx(50.0 / tiopt.TRANSPORT_SPEED_LIMIT)
+    assert program.initial_zones == [0] * program.n_ions
     # Each ion makes one move at a time
     for ion in range(1, program.n_ions + 1):
         own = [m for m in moves if m.ion == ion]
@@ -174,3 +189,124 @@ def test_commute_moves_diagonal_gates_into_fewer_rounds(repository):
         # The layers of the circuit itself are unchanged
         assert [i.layer for i in circuit.instructions] == layers
     assert rounds[True] < rounds[False]
+
+
+def test_trap_graph_from_segments_routes():
+    # A T junction with a longer third arm
+    graph = tiopt.TrapGraph.from_segments(["load+storage", "junction", "gate", "measure"], [4, 0, 2, 4],
+                                          [(-200, 0), (0, 0), (200, 0), (0, 200)], [(0, 1), (1, 2), (1, 3)], [0, 0, 300])
+    assert graph.distance(0, 2) == pytest.approx(400.0)
+    assert graph.distance(2, 3) == pytest.approx(500.0)
+    assert graph.route(3, 0) == [3, 1, 0]
+    np.testing.assert_allclose(graph.positions[:, 2], tiopt.ION_HEIGHT)
+    with pytest.raises(ValueError):
+        tiopt.TrapGraph.from_segments(["load", "gate"], [2, 2], [(0, 0), (100, 0)], [(0, 2)])
+
+
+def test_schedule_on_qccd_architecture(tmp_path):
+    from tiopt import qccd
+
+    # Storage on the left and two gate traps on the right of a Y junction, as a QCCD architecture
+    architecture = qccd.Architecture()
+    storage = architecture.add_trap("S", 4, (-200.0, 0.0), gate_zone=False)
+    junction = architecture.add_junction("J", (0.0, 0.0))
+    upper = architecture.add_trap("G1", 2, (150.0, 100.0))
+    lower = architecture.add_trap("G2", 2, (150.0, -100.0))
+    architecture.connect(storage, junction, 200.0)
+    architecture.connect(junction, upper, 180.0)
+    architecture.connect(junction, lower, 180.0)
+    graph = tiopt.TrapGraph.from_architecture(architecture)
+    assert graph.zone_types == ["load+storage", "junction", "gate+measure", "gate+measure"]
+    assert graph.distance(storage, upper) == pytest.approx(380.0)
+    assert graph.route(upper, lower) == [upper, junction, lower]
+
+    qasm = tmp_path / "pairs.qasm"
+    measurements = "".join(f"measure qreg[{q}] -> creg[{q}];\n" for q in range(4))
+    qasm.write_text("qubit[4] qreg;\nbit[4] creg;\ncx qreg[0], qreg[1];\ncx qreg[2], qreg[3];\n" + measurements)
+    program = tiopt.TransportProgram(graph, tiopt.Circuit(str(qasm)), "layer-assign")
+    # Both gates run at once, one in each gate trap, and every ion crosses the junction on the way
+    assert program.rounds[0] == program.rounds[1]
+    assert {program.moves[k].to_zone for k in range(4)} == {upper, lower}
+    steps = program.steps
+    assert all(graph.distance(s.zone, s.to_zone) > 0 for s in steps if s.type == "move")
+    assert not any(s.type == "merge" and s.zone == junction for s in steps)
+    assert sum(s.type == "junction" for s in steps) == sum(1 for m in program.moves if m.from_zone != m.to_zone)
+
+    # Every trap of an architecture made only of gate traps would have to load and store ions
+    with pytest.raises(ValueError):
+        tiopt.TrapGraph.from_architecture(qccd.Architecture.linear(3, 4))
+
+
+def test_check_finds_no_violations_in_valid_schedules(circuit):
+    # Schedules of every strategy which splits layers into rounds keep the rules of shuttling, while the original
+    # strategies move ions away before their operations when a layer does not fit in the zones
+    for strategy in ("rounds", "lookahead", "layer-assign"):
+        program = tiopt.TransportProgram(tiopt.TrapGraph(ZONES, CAPACITIES, -150.0, 150.0), circuit, strategy, lookahead_layers=2)
+        assert program.check() == []
+    baseline = tiopt.TransportProgram(tiopt.TrapGraph(ZONES, CAPACITIES, -150.0, 150.0), circuit, "baseline")
+    violations = baseline.check()
+    assert violations and any("is not in the chain there" in v for v in violations)
+
+
+def test_default_cost_model_is_qccd():
+    from tiopt import gates, qccd
+
+    # The scheduler's default cost model has the durations, heating and errors of tiopt.qccd, in s rather than µs
+    default = tiopt.lib._lib.default_transport_cost_model()
+    from_qccd = tiopt.transport_cost_model(qccd.TimingModel(), qccd.NoiseModel())
+    for name, _ in tiopt.lib.TransportCostModelStruct._fields_:
+        assert getattr(default, name) == pytest.approx(getattr(from_qccd, name), rel=1e-12), name
+    assert default.speed == pytest.approx(20e6) and default.split == pytest.approx(80e-6)
+    # Its gate model gives the durations of tiopt.gates
+    for n_ions, separation in ((2, 1), (8, 3), (16, 7)):
+        assert tiopt.lib._lib.two_qubit_gate_time(default, n_ions, separation) == pytest.approx(
+            1e-6 * gates.gate_time_model("FM", n_ions, separation))
+
+
+def test_move_through_junction_takes_qccd_time(tmp_path):
+    from tiopt import qccd
+
+    # Two ions in storage go through a Y junction to a gate trap: the first splits off, moves along both segments, and
+    # crosses the junction, as QCCDSim's travel time without the merge (its destination is empty)
+    architecture = qccd.Architecture()
+    storage = architecture.add_trap("S", 4, (-200.0, 0.0), gate_zone=False)
+    junction = architecture.add_junction("J", (0.0, 0.0))
+    upper = architecture.add_trap("G1", 2, (150.0, 100.0))
+    lower = architecture.add_trap("G2", 2, (150.0, -100.0))
+    architecture.connect(storage, junction, 200.0)
+    architecture.connect(junction, upper, 180.0)
+    architecture.connect(junction, lower, 180.0)
+    timing = qccd.TimingModel()
+
+    qasm = tmp_path / "pair.qasm"
+    qasm.write_text("qubit[2] qreg;\ncx qreg[0], qreg[1];\n")
+    program = tiopt.TransportProgram(tiopt.TrapGraph.from_architecture(architecture), tiopt.Circuit(str(qasm)))
+    first = program.moves[0]
+    expected = timing.split + timing.move_time(200.0) + timing.junction_y + timing.move_time(180.0)
+    assert (first.arrive - first.depart) * 1e6 == pytest.approx(expected)
+    # The second merges into the chain there, which QCCDSim also counts
+    compiler_time = qccd._Compiler(architecture, timing, qccd.NoiseModel(), 2)
+    compiler_time.location = {0: storage, 1: storage}
+    assert compiler_time.travel_time(0, upper) == pytest.approx(expected + timing.merge)
+    assert program.check() == []
+
+
+def test_fidelity_follows_qccd_noise_model(tmp_path):
+    from tiopt import gates, qccd
+
+    # Two cx gates on the same pair: with lookahead the ions stay in the gate zone, so the only operations are the two
+    # gates, each with the fidelity 1 - gamma tau - A (2 n_bar + 1) of tiopt.qccd at the mean phonon number of the chain
+    qasm = tmp_path / "twice.qasm"
+    qasm.write_text("qubit[2] qreg;\ncx qreg[0], qreg[1];\ncx qreg[0], qreg[1];\n")
+    graph = tiopt.TrapGraph.from_layout("load+storage, empty, gate, measure", 100.0, 2)
+    program = tiopt.TransportProgram(graph, tiopt.Circuit(str(qasm)), "lookahead")
+    noise = qccd.NoiseModel()
+    tau = gates.gate_time_model("FM", 2, 1)
+    n_bars = program.operation_n_bars
+    assert n_bars[1] == pytest.approx(n_bars[0] + noise.background_heating * tau)
+    a = noise.motional_error * 2 / np.log(2)
+    expected = np.prod([1 - noise.gate_background_error * tau - a * (2 * n + 1) for n in n_bars])
+    assert program.fidelity == pytest.approx(expected, rel=1e-12)
+    assert program.max_n_bar == pytest.approx(n_bars.max())
+    assert not any(step.type == "gate swap" for step in program.steps)
+    assert program.check() == []

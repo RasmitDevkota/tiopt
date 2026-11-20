@@ -12,6 +12,7 @@
 #include "circuits.h"
 #include "transport.h"
 #include "zones.h"
+#include "schedule_check.h"
 
 // Compare the strategies of generate_transport_schedule_strategy on circuits and zone layouts, by the schedules they
 // make (following the ions through every move, including the moves back into storage which transport programs do not
@@ -54,9 +55,15 @@ struct ScheduleResult
 {
 	int scheduled; // whether the scheduler made a schedule
 	int n_invalid; // operations whose ions are not all in a zone of the right type when it happens, and zones over capacity
-	double makespan; // (s)
-	double distance; // total distance moved by the ions (µm)
+	double makespan; // when the last operation ends (s)
+	double distance; // total distance moved by the ions along the segments of the trap (µm)
 	int n_moves; // moves of an ion to a different zone
+	int n_splits; // splits of an ion off a chain
+	int n_merges; // merges of an ion into a chain
+	int n_swaps; // swaps of neighboring ions in a chain, to bring an ion to the end of its chain
+	int n_violations; // violations of the physical rules of shuttling found by check_schedule_trace
+	double fidelity; // estimated fidelity of the program in the cost model (that of tiopt.qccd)
+	double max_n_bar; // largest mean phonon number of a chain at a two-qubit gate
 	double run_time; // median time taken by the scheduler (s)
 };
 
@@ -107,37 +114,6 @@ static void silence_stdout
 	}
 }
 
-static double zone_distance
-(
-	struct TrapGraph *trap_graph,
-	int a,
-	int b
-)
-{
-	double *p = trap_graph->zone_nodes[a].position;
-	double *q = trap_graph->zone_nodes[b].position;
-
-	return sqrt(pow(p[0] - q[0], 2) + pow(p[1] - q[1], 2) + pow(p[2] - q[2], 2));
-}
-
-// Duration of an operation, as in schedule_arrival_times
-static double operation_duration
-(
-	struct InstructionNode *node
-)
-{
-	if (node->operation_duration > 0.0)
-		return node->operation_duration;
-
-	if (node->operation_type & DETECT)
-		return DETECTION_DURATION;
-
-	if (node->operation_type & COOL)
-		return COOLING_DURATION;
-
-	return GATE_DURATION;
-}
-
 static enum ZoneType operation_zone_type
 (
 	struct InstructionNode *node
@@ -156,8 +132,8 @@ static enum ZoneType operation_zone_type
 }
 
 // Follow the ions through the moves of a schedule, checking that every operation finds its ions in a zone of its type
-// with room for them, and adding up the makespan: in each round, the ions first move back into storage and then into
-// the zones of their operations (each all at once), and then the operations run
+// with room for them, and adding up the distance they move along the segments of the trap; the makespan is when the
+// last operation of the program ends, and the steps which carry out the moves are counted
 static void evaluate_schedule
 (
 	struct TrapGraph *trap_graph,
@@ -192,21 +168,22 @@ static void evaluate_schedule
 	for (int i = 0; i < circuit_graph->n_instruction_nodes; i++)
 		layer_moves[trace->transport_rounds[i]] += circuit_graph->instruction_nodes[i].n_target_ions;
 
-	double *release_distances = calloc(n_ions, sizeof(double));
-	double *transport_distances = calloc(n_ions, sizeof(double));
 	int *op_zones = malloc(circuit_graph->n_instruction_nodes * sizeof(int));
 
 	result->n_invalid = 0;
 	result->makespan = 0.0;
 	result->distance = 0.0;
 	result->n_moves = 0;
+	result->n_splits = 0;
+	result->n_merges = 0;
+	result->n_swaps = 0;
 
 	int layer = 1;
 	for (int m = 0; m < trace->n_moves && layer <= n_layers; m++)
 	{
 		struct IonMove *move = &trace->moves[m];
 		int ion = move->ion - 1;
-		double distance = zone_distance(trap_graph, move->from_zone, move->to_zone);
+		double distance = trap_graph_distance(trap_graph, move->from_zone, move->to_zone);
 
 		result->distance += distance;
 		result->n_moves += (move->from_zone != move->to_zone);
@@ -216,29 +193,14 @@ static void evaluate_schedule
 		ion_zones[ion] = move->to_zone;
 
 		if (move->transport < 0)
-		{
-			release_distances[ion] += distance;
 			continue;
-		}
 
-		transport_distances[ion] += distance;
 		op_zones[move->transport] = move->to_zone;
 
 		if (--layer_moves[layer] > 0)
 			continue;
 
 		// Every ion of the layer has arrived, so its operations run now
-		double max_release = 0.0;
-		double max_transport = 0.0;
-		double max_duration = 0.0;
-		for (int i = 0; i < n_ions; i++)
-		{
-			max_release = MAX(max_release, release_distances[i]);
-			max_transport = MAX(max_transport, transport_distances[i]);
-			release_distances[i] = 0.0;
-			transport_distances[i] = 0.0;
-		}
-
 		for (int o = layer_starts[layer - 1]; o < layer_starts[layer]; o++)
 		{
 			struct InstructionNode *node = &circuit_graph->instruction_nodes[order[o]];
@@ -249,22 +211,31 @@ static void evaluate_schedule
 				n_wrong += (ion_zones[node->target_ions[t] - 1] != zone);
 
 			result->n_invalid += (n_wrong > 0);
-			max_duration = MAX(max_duration, operation_duration(node));
 		}
 
 		for (int z = 0; z < n_zones; z++)
 			result->n_invalid += (occupancy[z] > trap_graph->zone_nodes[z].zone_capacity);
 
-		result->makespan += (max_release + max_transport) / TRANSPORT_SPEED_LIMIT + max_duration;
 		layer++;
 	}
 
 	// Layers whose ions never all arrived
 	result->n_invalid += n_layers + 1 - layer;
 
+	for (int k = 0; k < trace->n_steps; k++)
+	{
+		struct TransportStep *step = &trace->steps[k];
+
+		result->makespan = MAX(result->makespan, step->end);
+		result->n_splits += (step->type == STEP_SPLIT);
+		result->n_merges += (step->type == STEP_MERGE);
+		result->n_swaps += (step->type == STEP_ION_SWAP || step->type == STEP_GATE_SWAP);
+	}
+
+	result->fidelity = trace->fidelity;
+	result->max_n_bar = trace->max_n_bar;
+
 	free(op_zones);
-	free(transport_distances);
-	free(release_distances);
 	free(layer_moves);
 	free(occupancy);
 	free(ion_zones);
@@ -366,13 +337,16 @@ int main
 	const char *csv_filename = (argc > 1) ? argv[1] : "schedule_benchmark.csv";
 	FILE *csv = fopen(csv_filename, "w");
 	if (csv != NULL)
-		fprintf(csv, "circuit,qubits,operations,layout,strategy,scheduled,invalid,rounds,makespan_us,distance_um,moves,run_time_us\n");
+		fprintf(csv, "circuit,qubits,operations,layout,strategy,scheduled,invalid,violations,rounds,makespan_us,fidelity,max_n_bar,distance_um,moves,splits,merges,swaps,run_time_us\n");
 
 	int n_mismatches = 0;
 	int n_worse = 0;
 	int n_timing = 0;
 	int n_order = 0;
 	int n_commute_slower = 0;
+	int n_slower = 0;
+	int n_violating = 0;
+	int n_original_violating = 0;
 
 	struct dirent **entries;
 	int n_entries = scandir(CIRCUIT_DIR, &entries, NULL, alphasort);
@@ -382,7 +356,7 @@ int main
 		return 1;
 	}
 
-	printf("%-20s %-42s %-22s %7s %7s %12s %13s %7s %12s\n", "circuit", "layout", "strategy", "valid", "rounds", "makespan(us)", "distance(um)", "moves", "time(us)");
+	printf("%-20s %-42s %-22s %7s %7s %12s %9s %7s %13s %7s %7s %12s\n", "circuit", "layout", "strategy", "valid", "rounds", "makespan(us)", "fidelity", "n_bar", "distance(um)", "moves", "swaps", "time(us)");
 
 	for (int c = 0; c < n_entries; c++)
 	{
@@ -432,15 +406,36 @@ int main
 				{
 					evaluate_schedule(&trap_graph, circuit_graph, programs[s], &traces[s], result);
 
-					// The arrival times of the program must give the makespan found here from the moves of the ions,
-					// including the moves back into storage
-					double program_makespan = 0.0;
-					for (int i = 0; i < circuit_graph->n_instruction_nodes; i++)
-						program_makespan = MAX(program_makespan, programs[s]->arrival_times[i] + operation_duration(&circuit_graph->instruction_nodes[i]));
-
-					if (fabs(program_makespan - result->makespan) > 1E-9 * MAX(result->makespan, 1E-6))
+					// Every schedule is checked independently of the scheduler; the original schedulers (baseline and
+					// fast) move ions away before their operations when a layer does not fit, so theirs can fail
+					char message[1024];
+					struct TransportCostModel cost_model = default_transport_cost_model();
+					result->n_violations = check_schedule_trace(&trap_graph, circuit_graph, programs[s], &traces[s], &cost_model, message, sizeof(message));
+					if (result->n_violations > 0 && s >= 2)
 					{
-						printf("  TIMING: %s program ends at %.2f us, but its moves take %.2f us\n", strategy_names[s], 1E6 * program_makespan, 1E6 * result->makespan);
+						printf("  CHECK: %s breaks the rules of shuttling %d times, first: %.*s\n", strategy_names[s], result->n_violations, (int) strcspn(message, "\n"), message);
+						n_violating++;
+					}
+					else if (result->n_violations > 0)
+						n_original_violating++;
+
+					// Every operation must start once all of its ions have arrived, at the arrival time of the program
+					int n_early = 0;
+					for (int m = 0; m < traces[s].n_moves; m++)
+					{
+						struct IonMove *move = &traces[s].moves[m];
+						n_early += (move->transport >= 0 && move->arrive > programs[s]->arrival_times[move->transport] + 1E-12);
+					}
+
+					for (int k = 0; k < traces[s].n_steps; k++)
+					{
+						struct TransportStep *step = &traces[s].steps[k];
+						n_early += (step->type == STEP_OPERATION && fabs(step->start - programs[s]->arrival_times[step->index]) > 1E-12);
+					}
+
+					if (n_early > 0)
+					{
+						printf("  TIMING: %s starts %d operations before their ions arrive, or not at their arrival time\n", strategy_names[s], n_early);
 						n_timing++;
 					}
 				}
@@ -468,14 +463,14 @@ int main
 				qsort(run_times, n_runs, sizeof(double), compare_doubles);
 				result->run_time = run_times[n_runs / 2];
 
-				int valid = result->scheduled && result->n_invalid == 0;
+				int valid = result->scheduled && result->n_invalid == 0 && result->n_violations == 0;
 				int n_rounds = (programs[s] != NULL) ? traces[s].n_rounds : 0;
-				printf("%-20s %-42s %-22s %7s %7d %12.2f %13.0f %7d %12.2f\n", circuit_name, layouts[l], strategy_names[s],
-					!result->scheduled ? "fail" : valid ? "yes" : "NO", n_rounds, 1E6 * result->makespan, result->distance, result->n_moves, 1E6 * result->run_time);
+				printf("%-20s %-42s %-22s %7s %7d %12.2f %9.5f %7.3f %13.0f %7d %7d %12.2f\n", circuit_name, layouts[l], strategy_names[s],
+					!result->scheduled ? "fail" : valid ? "yes" : "NO", n_rounds, 1E6 * result->makespan, result->fidelity, result->max_n_bar, result->distance, result->n_moves, result->n_swaps, 1E6 * result->run_time);
 
 				if (csv != NULL)
-					fprintf(csv, "%s,%d,%d,\"%s\",%s,%d,%d,%d,%.6f,%.3f,%d,%.6f\n", circuit_name, circuit_graph->n_ions, circuit_graph->n_instruction_nodes, layouts[l], strategy_names[s],
-						result->scheduled, result->n_invalid, n_rounds, 1E6 * result->makespan, result->distance, result->n_moves, 1E6 * result->run_time);
+					fprintf(csv, "%s,%d,%d,\"%s\",%s,%d,%d,%d,%d,%.6f,%.9f,%.6f,%.3f,%d,%d,%d,%d,%.6f\n", circuit_name, circuit_graph->n_ions, circuit_graph->n_instruction_nodes, layouts[l], strategy_names[s],
+						result->scheduled, result->n_invalid, result->n_violations, n_rounds, 1E6 * result->makespan, result->fidelity, result->max_n_bar, result->distance, result->n_moves, result->n_splits, result->n_merges, result->n_swaps, 1E6 * result->run_time);
 			}
 
 			// The fast scheduler must make exactly the same schedule as the baseline
@@ -485,25 +480,28 @@ int main
 				n_mismatches++;
 			}
 
-			// The other strategies must always make valid schedules, and layer-assign (looking one layer ahead) must make
-			// them no longer than the rounds alone do (lookahead places operations greedily, so it sometimes makes them a
-			// little longer, and looking further ahead can keep ions in zones which other operations need)
+			// The other strategies must always make valid schedules. None is sure to be faster than rounds: the strategies
+			// choose zones by distance, but ions which share a segment or pass through a chain wait for each other, so a
+			// shorter longest move can still make a longer round (which is counted and reported rather than failed)
 			for (int s = 2; s < N_STRATEGIES; s++)
 			{
-				int valid = results[s].scheduled && results[s].n_invalid == 0;
+				int valid = results[s].scheduled && results[s].n_invalid == 0 && results[s].n_violations == 0;
 				int slower = valid && s > 2 && results[s].makespan > results[2].makespan * (1.0 + 1E-12);
 
-				if (!valid || (slower && strategies[s].strategy == SCHEDULE_LAYER_ASSIGN && strategies[s].lookahead_layers == 1 && !strategies[s].commute))
+				if (!valid)
 				{
-					printf("  WORSE: %s is %s\n", strategy_names[s], valid ? "slower than rounds" : "invalid");
+					printf("  WORSE: %s is invalid\n", strategy_names[s]);
 					n_worse++;
 				}
 				else if (slower)
+				{
 					printf("  NOTE: %s is slower than rounds\n", strategy_names[s]);
+					n_slower++;
+				}
 
 				// Moving commuting operations into fewer layers can still lengthen a schedule, which is counted (and
 				// reported) rather than failed
-				if (valid && bases[s] >= 0 && results[bases[s]].scheduled && results[s].makespan > results[bases[s]].makespan * (1.0 + 1E-12))
+				if (valid && bases[s] >= 0 && results[bases[s]].scheduled && results[bases[s]].n_violations == 0 && results[s].makespan > results[bases[s]].makespan * (1.0 + 1E-12))
 				{
 					printf("  NOTE: %s is slower than %s\n", strategy_names[s], strategy_names[bases[s]]);
 					n_commute_slower++;
@@ -548,8 +546,9 @@ int main
 		printf("\nWrote %s\n", csv_filename);
 	}
 
-	printf("%d mismatches between the fast and baseline schedules, %d invalid schedules or schedules slower than rounds, %d programs whose arrival times disagree with their moves, %d schedules which break the order of the circuit\n", n_mismatches, n_worse, n_timing, n_order);
-	printf("%d schedules with commuting operations moved are slower than without (reported, not failed)\n", n_commute_slower);
+	printf("%d mismatches between the fast and baseline schedules, %d invalid schedules, %d programs whose arrival times disagree with their moves, %d schedules which break the order of the circuit\n", n_mismatches, n_worse, n_timing, n_order);
+	printf("%d schedules slower than rounds, and %d with commuting operations moved slower than without (reported, not failed)\n", n_slower, n_commute_slower);
+	printf("%d schedules break the rules of shuttling (check_schedule_trace), and %d of the original (baseline and fast) schedules do (reported, not failed)\n", n_violating, n_original_violating);
 
-	return (n_mismatches > 0 || n_worse > 0 || n_timing > 0 || n_order > 0);
+	return (n_mismatches > 0 || n_worse > 0 || n_timing > 0 || n_order > 0 || n_violating > 0);
 }

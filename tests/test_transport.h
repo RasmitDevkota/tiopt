@@ -50,6 +50,31 @@ int test_schedule_trace_times
 	double atol
 );
 
+int test_trap_graph_routes
+(
+	double atol
+);
+
+int test_schedule_through_junction
+(
+	double atol
+);
+
+int test_three_ion_schedule_by_hand
+(
+	double atol
+);
+
+int test_schedule_check_finds_violations
+(
+	double atol
+);
+
+int test_qccd_cost_model_by_hand
+(
+	double atol
+);
+
 int test_lookahead_layers
 (
 	double atol
