@@ -31,6 +31,8 @@ int test_all_transport
 	result += test_fast_schedule_matches_baseline(atol);
 	result += test_schedule_rounds_fit_zones(atol);
 	result += test_schedule_trace_times(atol);
+	result += test_trap_graph_routes(atol);
+	result += test_schedule_through_junction(atol);
 	result += test_lookahead_layers(atol);
 	result += test_commuting_layers(atol);
 
@@ -204,8 +206,9 @@ int test_generate_transport_schedule
 			n_wrong += (transport_program->arrival_times[t] <= transport_program->arrival_times[t-1]);
 	}
 
-	// The first round starts after the 200 µm transport from the load zone to the gate zone
-	n_wrong += (fabs(transport_program->arrival_times[0] - 200.0 / TRANSPORT_SPEED_LIMIT) > atol);
+	// The first round starts after the 200 µm transport from the load zone to the gate zone, with the second ion one
+	// 50 µm segment behind the first
+	n_wrong += (fabs(transport_program->arrival_times[0] - 250.0 / TRANSPORT_SPEED_LIMIT) > atol);
 
 	free_schedule_trace(&trace);
 	free_transport_program(transport_program);
@@ -419,6 +422,7 @@ int test_schedule_trace_times
 	enum ZoneType zone_types[7] = { LOAD_ZONE, EMPTY_ZONE, STORAGE_ZONE, EMPTY_ZONE, GATE_ZONE, EMPTY_ZONE, MEASURE_ZONE };
 	int zone_capacities[7] = { 5, 3, 10, 3, 2, 3, 4 };
 
+	// Zones 50 µm apart, from -150 µm to 150 µm
 	struct TrapGraph trap_graph;
 	generate_linear_trap_graph(7, zone_types, zone_capacities, -150.0, 150.0, ION_HEIGHT, &trap_graph);
 
@@ -436,6 +440,7 @@ int test_schedule_trace_times
 	}
 
 	double eps = 1E-12;
+	double segment = 50.0 / TRANSPORT_SPEED_LIMIT;
 	int n_wrong = 0;
 	int n_releases = 0;
 
@@ -443,9 +448,9 @@ int test_schedule_trace_times
 	{
 		struct IonMove *move = &trace.moves[m];
 
-		// Every move takes as long as its distance at the speed limit
+		// A move takes at least as long as its distance at the speed limit
 		double distance = fabs(trap_graph.zone_nodes[move->to_zone].position[0] - trap_graph.zone_nodes[move->from_zone].position[0]);
-		n_wrong += (fabs(move->arrive - move->depart - distance / TRANSPORT_SPEED_LIMIT) > eps);
+		n_wrong += (move->arrive - move->depart < distance / TRANSPORT_SPEED_LIMIT - eps);
 
 		// An ion makes one move at a time
 		for (int p = m - 1; p >= 0; p--)
@@ -464,38 +469,169 @@ int test_schedule_trace_times
 
 	n_wrong += (n_releases == 0);
 
-	// In the second round, ions 1 and 2 leave the gate zone (50 µm) for storage (-50 µm) once the first round is done,
-	// and only then do ions 3 and 4 come from the load zone (-150 µm), so the round arrives 300 µm of transport after the
-	// operations of the first round
-	int n_checked = 0;
-	int in_second_round = 0;
-	for (int m = 0; m < trace.n_moves; m++)
+	// Every step of a move lies within it, and every move along a segment takes a segment's length at the speed limit
+	int *n_swaps = calloc(trace.n_moves, sizeof(int));
+	for (int k = 0; k < trace.n_steps; k++)
 	{
-		struct IonMove *move = &trace.moves[m];
-		if (move->transport >= 0 && trace.transport_rounds[move->transport] == 2)
-		{
-			n_wrong += (fabs(move->depart - (transport_program->arrival_times[2] - 200.0 / TRANSPORT_SPEED_LIMIT)) > eps);
-			n_checked++;
-			in_second_round = 1;
-		}
+		struct TransportStep *step = &trace.steps[k];
+		if (step->type == STEP_OPERATION)
+			continue;
 
-		// Moves back into storage before the transports of the second round
-		if (move->transport < 0 && !in_second_round)
-		{
-			n_wrong += (move->depart <= transport_program->arrival_times[0]);
-			n_wrong += (fabs(move->arrive - move->depart - 100.0 / TRANSPORT_SPEED_LIMIT) > eps);
-			n_wrong += (fabs(move->arrive - (transport_program->arrival_times[2] - 200.0 / TRANSPORT_SPEED_LIMIT)) > eps);
-			n_checked++;
-		}
+		struct IonMove *move = &trace.moves[step->index];
+		n_wrong += (step->ion != move->ion) + (step->start < move->depart - eps) + (step->end > move->arrive + eps);
+
+		if (step->type == STEP_MOVE)
+			n_wrong += (abs(step->to_zone - step->zone) != 1) + (fabs(step->end - step->start - segment) > eps);
+
+		if (step->type == STEP_ION_SWAP)
+			n_swaps[step->index]++;
 	}
-	n_wrong += (n_checked != 4);
 
+	// Worked out by hand: in the first round, ions 1 and 2 leave the chain in the load zone (zone 0) for the gate zone
+	// (zone 4), ion 2 one segment behind ion 1, so the operations start at 250 µs and end at 350 µs. In the second round,
+	// ions 1 and 2 go back into storage (zone 2), arriving at 450 µs and 500 µs, and ions 3 and 4 leave the load zone at
+	// 350 µs. They have to pass through the chain in storage: each merges into its front, swaps with ions 1 and 2 to its
+	// back, splits off and goes on, so ion 3 waits in zone 1 until storage is free at 500 µs and arrives at 650 µs, and
+	// ion 4 arrives one segment later, at 700 µs
+	double expected_departures[6] = { 0.0, 0.0, 350.0, 350.0, 350.0, 350.0 };
+	double expected_arrivals[6] = { 200.0, 250.0, 450.0, 500.0, 650.0, 700.0 };
+	int expected_ions[6] = { 1, 2, 1, 2, 3, 4 };
+	int expected_swaps[6] = { 0, 0, 1, 0, 2, 2 };
+	for (int m = 0; m < MIN(trace.n_moves, 6); m++)
+	{
+		n_wrong += (trace.moves[m].ion != expected_ions[m]);
+		n_wrong += (fabs(trace.moves[m].depart - expected_departures[m] / TRANSPORT_SPEED_LIMIT) > eps);
+		n_wrong += (fabs(trace.moves[m].arrive - expected_arrivals[m] / TRANSPORT_SPEED_LIMIT) > eps);
+		n_wrong += (n_swaps[m] != expected_swaps[m]);
+	}
+	n_wrong += (trace.n_moves < 6);
+	n_wrong += (fabs(transport_program->arrival_times[0] - 250.0 / TRANSPORT_SPEED_LIMIT) > eps);
+	n_wrong += (fabs(transport_program->arrival_times[2] - 700.0 / TRANSPORT_SPEED_LIMIT) > eps);
+
+	free(n_swaps);
 	free_schedule_trace(&trace);
 	free_transport_program(transport_program);
 	free_circuit_graph(circuit_graph);
 	free_trap_graph(&trap_graph);
 
 	return check_error("time_schedule_trace times every move", n_wrong, 0);
+}
+
+// A T junction: storage on the left, a gate zone on the right, and a measurement zone up the third arm, whose segment
+// is longer than the distance between the centers of its zones
+static void generate_t_junction_graph
+(
+	struct TrapGraph *trap_graph
+)
+{
+	enum ZoneType zone_types[4] = { LOAD_ZONE | STORAGE_ZONE, JUNCTION_ZONE, GATE_ZONE, MEASURE_ZONE };
+	int zone_capacities[4] = { 4, 0, 2, 4 };
+	double positions[4][3] = { { -200.0, 0.0, ION_HEIGHT }, { 0.0, 0.0, ION_HEIGHT }, { 200.0, 0.0, ION_HEIGHT }, { 0.0, 200.0, ION_HEIGHT } };
+	int segments[3][2] = { { 0, 1 }, { 1, 2 }, { 1, 3 } };
+	double lengths[3] = { 0.0, 0.0, 300.0 };
+
+	generate_trap_graph(4, zone_types, zone_capacities, positions, 3, segments, lengths, trap_graph);
+}
+
+int test_trap_graph_routes
+(
+	double atol
+)
+{
+	struct TrapGraph trap_graph;
+	generate_t_junction_graph(&trap_graph);
+
+	int n_wrong = 0;
+	int path[4];
+
+	// Straight through the junction, and up its third arm
+	n_wrong += (trap_graph_route(&trap_graph, 0, 2, path) != 3) || path[0] != 0 || path[1] != 1 || path[2] != 2;
+	n_wrong += (fabs(trap_graph_distance(&trap_graph, 0, 2) - 400.0) > atol);
+	n_wrong += (fabs(trap_graph_distance(&trap_graph, 2, 3) - 500.0) > atol);
+	n_wrong += (trap_graph_route(&trap_graph, 3, 0, path) != 3) || path[1] != 1 || path[2] != 0;
+
+	// The junction joins all three arms
+	n_wrong += (trap_graph_neighbors(&trap_graph, 1, path) != 3);
+	n_wrong += (trap_graph_neighbors(&trap_graph, 3, path) != 1) || path[0] != 1;
+
+	// A zone with no segments has no path to the others
+	struct TrapGraph unjoined;
+	enum ZoneType zone_types[2] = { LOAD_ZONE, GATE_ZONE };
+	int zone_capacities[2] = { 2, 2 };
+	double positions[2][3] = { { 0.0, 0.0, ION_HEIGHT }, { 100.0, 0.0, ION_HEIGHT } };
+	generate_trap_graph(2, zone_types, zone_capacities, positions, 0, NULL, NULL, &unjoined);
+	n_wrong += (trap_graph_distance(&unjoined, 0, 1) != HUGE_VAL) + (trap_graph_route(&unjoined, 0, 1, path) != 0);
+
+	free_trap_graph(&unjoined);
+	free_trap_graph(&trap_graph);
+
+	return check_error("trap graphs route along their segments", n_wrong, 0);
+}
+
+int test_schedule_through_junction
+(
+	double atol
+)
+{
+	// Two ions are entangled in the gate zone and measured up the third arm, crossing the junction each way
+	char *filename = "junction_test.qasm";
+	FILE *fp = fopen(filename, "w");
+	fprintf(fp, "qubit[2] qreg;\nbit[2] creg;\nh qreg[0];\ncx qreg[0], qreg[1];\nmeasure qreg -> creg;\n");
+	fclose(fp);
+
+	struct CircuitGraph *circuit_graph = parse_qasm(filename);
+	remove(filename);
+
+	struct TrapGraph trap_graph;
+	generate_t_junction_graph(&trap_graph);
+
+	struct TransportCostModel cost_model = default_transport_cost_model();
+	cost_model.junction_y = 30E-6;
+	struct ScheduleOptions options = { SCHEDULE_ROUNDS, 1, 0, &cost_model };
+
+	struct TransportProgram *program = calloc(1, sizeof(struct TransportProgram));
+	struct ScheduleTrace trace = { 0 };
+	int n_wrong = (circuit_graph == NULL);
+
+	if (circuit_graph == NULL || generate_transport_schedule_options(&trap_graph, circuit_graph, program, &options, &trace) == NULL)
+		n_wrong++;
+	else
+	{
+		int n_crossings = 0;
+		for (int k = 0; k < trace.n_steps; k++)
+		{
+			struct TransportStep *step = &trace.steps[k];
+
+			// Ions move only along segments, never rest in the junction, and take 30 µs to cross it
+			if (step->type == STEP_MOVE)
+				n_wrong += (trap_graph.segment_lengths[step->zone * 4 + step->to_zone] < 0.0);
+			if (step->type == STEP_MERGE)
+				n_wrong += (step->zone == 1);
+			if (step->type == STEP_JUNCTION)
+			{
+				n_wrong += (step->zone != 1) + (fabs(step->end - step->start - 30E-6) > 1E-12);
+				n_crossings++;
+			}
+		}
+
+		// Ion 1 crosses to the gate zone and back for the h gate, both ions do for the cx gate, and both cross up to the
+		// measurement zone and back into storage at the end
+		n_wrong += (n_crossings != 10);
+
+		// The move from storage up the third arm takes its 200 µm and 300 µm segments at the speed limit, and the
+		// crossing
+		for (int m = 0; m < trace.n_moves; m++)
+			if (trace.moves[m].transport == 2 && trace.moves[m].from_zone == 0)
+				n_wrong += (trace.moves[m].arrive - trace.moves[m].depart < 500.0 / TRANSPORT_SPEED_LIMIT + 30E-6 - 1E-12);
+	}
+
+	free_schedule_trace(&trace);
+	free_transport_program(program);
+	free_trap_graph(&trap_graph);
+	if (circuit_graph != NULL)
+		free_circuit_graph(circuit_graph);
+
+	return check_error("schedules move ions through junctions along the segments", n_wrong, 0);
 }
 
 // Whether two schedules are exactly the same

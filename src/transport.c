@@ -156,8 +156,8 @@ static int schedule_baseline
     return 0;
 }
 
-// Assign each operation of a layer to a zone of its type, so that the longest distance any target ion moves is as short
-// as possible (and then the total distance), with branch and bound over the zones of the operations in order of their
+// Assign each operation of a layer to a zone of its type, so that the longest distance any target ion moves along the
+// segments of the trap graph is as short as possible (and then the total distance), with branch and bound over the zones of the operations in order of their
 // shortest possible transport, longest first; ions which no operation of the layer targets stay where they are. Returns
 // 1 if no assignment fits in the zones
 #define LAYER_ASSIGN_MAX_NODES 20000
@@ -170,7 +170,7 @@ struct LayerAssignment
     int *n_targets; // implicitly, length n_ops
     int *n_candidates; // implicitly, length n_ops
     int **candidates; // zones each operation can use, nearest first; implicitly, length n_ops-by-[n_candidates]
-    double **costs; // longest distance moved by a target ion for each candidate; implicitly, like candidates
+    double **costs; // longest distance moved by a target ion for each candidate (along the segments); implicitly, like candidates
     double **sums; // total distance moved by the target ions for each candidate; implicitly, like candidates
     int *free_capacity; // room left in each zone; implicitly, length n_zones
     int *choice; // implicitly, length n_ops
@@ -277,11 +277,14 @@ static int assign_layer_zones
             double cost = 0.0;
             double sum = 0.0;
             for (int t = 0; t < instr->n_target_ions; t++) {
-                double *position = ion_states[instr->target_ions[t] - 1]->position;
-                double distance = sqrt(pow(zones[z].position[0] - position[0], 2) + pow(zones[z].position[1] - position[1], 2) + pow(zones[z].position[2] - position[2], 2));
+                double distance = trap_graph_distance(trapGraph, (int) (ion_states[instr->target_ions[t] - 1] - zones), z);
 
                 cost = MAX(cost, distance);
                 sum += distance;
+            }
+
+            if (cost == HUGE_VAL) {
+                continue;
             }
 
             // Insert in order of cost, then total distance
@@ -725,7 +728,7 @@ struct TransportProgram* generate_transport_schedule_strategy
     struct ScheduleTrace *trace
 )
 {
-    struct ScheduleOptions options = { strategy, DEFAULT_LOOKAHEAD_LAYERS, 0 };
+    struct ScheduleOptions options = { strategy, DEFAULT_LOOKAHEAD_LAYERS, 0, NULL };
 
     return generate_transport_schedule_options(trapGraph, circuitGraph, transportProgram, &options, trace);
 }
@@ -783,6 +786,13 @@ static struct TransportProgram* schedule_with_options
         memcpy(transportProgram->initial_positions[i], ion_states[i]->position, sizeof(double[3]));
     }
 
+    free(trace->initial_zones);
+    trace->n_ions = transportProgram->n_ions;
+    trace->initial_zones = malloc(transportProgram->n_ions * sizeof(int));
+    for (int i = 0; i < transportProgram->n_ions; i++) {
+        trace->initial_zones[i] = (int) (ion_states[i] - trapGraph->zone_nodes);
+    }
+
     // Find how many layers in circuit (may be redundant)
     int max_layer = 0;
     for (int i = 0; i < circuitGraph->n_instruction_nodes; i++) {
@@ -832,12 +842,13 @@ static struct TransportProgram* schedule_with_options
     trace->n_rounds = n_rounds;
     trace->transport_rounds = rounds;
 
-    // Time every move, including the moves back into storage, and the arrival of every transport
-    time_schedule_trace(trapGraph, circuitGraph, transportProgram, trace);
+    // Time every move along the segments of the trap graph, including the moves back into storage, and the arrival of
+    // every transport
+    int timing_status = time_schedule_trace(trapGraph, circuitGraph, transportProgram, trace, options->cost_model);
 
     free_schedule_trace(&local_trace);
 
-    return transportProgram;
+    return (timing_status == 0) ? transportProgram : NULL;
 }
 
 // Generates transport schedule given circuit data and trap data with the given options, recording every move of the ions
@@ -879,12 +890,19 @@ void free_schedule_trace(struct ScheduleTrace *trace)
 {
     free(trace->moves);
     free(trace->transport_rounds);
+    free(trace->initial_zones);
+    free(trace->steps);
 
     trace->moves = NULL;
     trace->transport_rounds = NULL;
+    trace->initial_zones = NULL;
+    trace->steps = NULL;
     trace->n_rounds = 0;
     trace->n_moves = 0;
     trace->max_moves = 0;
+    trace->n_ions = 0;
+    trace->n_steps = 0;
+    trace->max_steps = 0;
 }
 
 // Helper to get operation type from QASM code, ignoring the parameters of the gate (e.g. "rz(0.5)"), which do not

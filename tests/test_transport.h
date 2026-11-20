@@ -50,6 +50,16 @@ int test_schedule_trace_times
 	double atol
 );
 
+int test_trap_graph_routes
+(
+	double atol
+);
+
+int test_schedule_through_junction
+(
+	double atol
+);
+
 int test_lookahead_layers
 (
 	double atol

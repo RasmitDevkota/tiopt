@@ -3,6 +3,7 @@
 #include "data_structures.h"
 
 struct ScheduleTrace;
+struct TransportCostModel;
 
 int add_qasm_targets
 (
@@ -59,12 +60,52 @@ void schedule_arrival_times_in_rounds
 	const int *rounds
 );
 
-void time_schedule_trace
+int time_schedule_trace
 (
 	struct TrapGraph *trap_graph,
 	struct CircuitGraph *circuit_graph,
 	struct TransportProgram *transport_program,
-	struct ScheduleTrace *trace
+	struct ScheduleTrace *trace,
+	const struct TransportCostModel *cost_model
+);
+
+void generate_trap_graph
+(
+	int n_zones,
+	enum ZoneType *zone_types,
+	int *zone_capacities,
+	double (*positions)[3],
+	int n_segments,
+	int (*segments)[2],
+	double *segment_lengths,
+	struct TrapGraph *trap_graph
+);
+
+int trap_graph_routes
+(
+	struct TrapGraph *trap_graph
+);
+
+double trap_graph_distance
+(
+	struct TrapGraph *trap_graph,
+	int from_zone,
+	int to_zone
+);
+
+int trap_graph_route
+(
+	struct TrapGraph *trap_graph,
+	int from_zone,
+	int to_zone,
+	int *path
+);
+
+int trap_graph_neighbors
+(
+	struct TrapGraph *trap_graph,
+	int zone,
+	int *neighbors
 );
 
 void generate_linear_trap_graph

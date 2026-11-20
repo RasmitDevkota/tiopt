@@ -281,6 +281,7 @@ void generate_trap_graph_from_zones
 {
 	int n_zones = trap->n_zones;
 
+	*trap_graph = (struct TrapGraph) { 0 };
 	trap_graph->n_zones = n_zones;
 	trap_graph->n_transport_edges = MAX(n_zones - 1, 0);
 	trap_graph->zone_nodes = calloc(MAX(n_zones, 1), sizeof(struct ZoneNode));
