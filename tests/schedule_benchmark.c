@@ -12,6 +12,7 @@
 #include "circuits.h"
 #include "transport.h"
 #include "zones.h"
+#include "schedule_check.h"
 
 // Compare the strategies of generate_transport_schedule_strategy on circuits and zone layouts, by the schedules they
 // make (following the ions through every move, including the moves back into storage which transport programs do not
@@ -60,6 +61,7 @@ struct ScheduleResult
 	int n_splits; // splits of an ion off a chain
 	int n_merges; // merges of an ion into a chain
 	int n_swaps; // swaps of neighboring ions in a chain, to bring an ion to the end of its chain
+	int n_violations; // violations of the physical rules of shuttling found by check_schedule_trace
 	double run_time; // median time taken by the scheduler (s)
 };
 
@@ -348,7 +350,7 @@ int main
 	const char *csv_filename = (argc > 1) ? argv[1] : "schedule_benchmark.csv";
 	FILE *csv = fopen(csv_filename, "w");
 	if (csv != NULL)
-		fprintf(csv, "circuit,qubits,operations,layout,strategy,scheduled,invalid,rounds,makespan_us,distance_um,moves,splits,merges,swaps,run_time_us\n");
+		fprintf(csv, "circuit,qubits,operations,layout,strategy,scheduled,invalid,violations,rounds,makespan_us,distance_um,moves,splits,merges,swaps,run_time_us\n");
 
 	int n_mismatches = 0;
 	int n_worse = 0;
@@ -356,6 +358,8 @@ int main
 	int n_order = 0;
 	int n_commute_slower = 0;
 	int n_slower = 0;
+	int n_violating = 0;
+	int n_original_violating = 0;
 
 	struct dirent **entries;
 	int n_entries = scandir(CIRCUIT_DIR, &entries, NULL, alphasort);
@@ -415,6 +419,18 @@ int main
 				{
 					evaluate_schedule(&trap_graph, circuit_graph, programs[s], &traces[s], result);
 
+					// Every schedule is checked independently of the scheduler; the original schedulers (baseline and
+					// fast) move ions away before their operations when a layer does not fit, so theirs can fail
+					char message[1024];
+					result->n_violations = check_schedule_trace(&trap_graph, circuit_graph, programs[s], &traces[s], NULL, message, sizeof(message));
+					if (result->n_violations > 0 && s >= 2)
+					{
+						printf("  CHECK: %s breaks the rules of shuttling %d times, first: %.*s\n", strategy_names[s], result->n_violations, (int) strcspn(message, "\n"), message);
+						n_violating++;
+					}
+					else if (result->n_violations > 0)
+						n_original_violating++;
+
 					// Every operation must start once all of its ions have arrived, and the program must end with its last
 					// operation
 					int n_early = 0;
@@ -458,14 +474,14 @@ int main
 				qsort(run_times, n_runs, sizeof(double), compare_doubles);
 				result->run_time = run_times[n_runs / 2];
 
-				int valid = result->scheduled && result->n_invalid == 0;
+				int valid = result->scheduled && result->n_invalid == 0 && result->n_violations == 0;
 				int n_rounds = (programs[s] != NULL) ? traces[s].n_rounds : 0;
 				printf("%-20s %-42s %-22s %7s %7d %12.2f %13.0f %7d %7d %12.2f\n", circuit_name, layouts[l], strategy_names[s],
 					!result->scheduled ? "fail" : valid ? "yes" : "NO", n_rounds, 1E6 * result->makespan, result->distance, result->n_moves, result->n_swaps, 1E6 * result->run_time);
 
 				if (csv != NULL)
-					fprintf(csv, "%s,%d,%d,\"%s\",%s,%d,%d,%d,%.6f,%.3f,%d,%d,%d,%d,%.6f\n", circuit_name, circuit_graph->n_ions, circuit_graph->n_instruction_nodes, layouts[l], strategy_names[s],
-						result->scheduled, result->n_invalid, n_rounds, 1E6 * result->makespan, result->distance, result->n_moves, result->n_splits, result->n_merges, result->n_swaps, 1E6 * result->run_time);
+					fprintf(csv, "%s,%d,%d,\"%s\",%s,%d,%d,%d,%d,%.6f,%.3f,%d,%d,%d,%d,%.6f\n", circuit_name, circuit_graph->n_ions, circuit_graph->n_instruction_nodes, layouts[l], strategy_names[s],
+						result->scheduled, result->n_invalid, result->n_violations, n_rounds, 1E6 * result->makespan, result->distance, result->n_moves, result->n_splits, result->n_merges, result->n_swaps, 1E6 * result->run_time);
 			}
 
 			// The fast scheduler must make exactly the same schedule as the baseline
@@ -480,7 +496,7 @@ int main
 			// shorter longest move can still make a longer round (which is counted and reported rather than failed)
 			for (int s = 2; s < N_STRATEGIES; s++)
 			{
-				int valid = results[s].scheduled && results[s].n_invalid == 0;
+				int valid = results[s].scheduled && results[s].n_invalid == 0 && results[s].n_violations == 0;
 				int slower = valid && s > 2 && results[s].makespan > results[2].makespan * (1.0 + 1E-12);
 
 				if (!valid)
@@ -496,7 +512,7 @@ int main
 
 				// Moving commuting operations into fewer layers can still lengthen a schedule, which is counted (and
 				// reported) rather than failed
-				if (valid && bases[s] >= 0 && results[bases[s]].scheduled && results[s].makespan > results[bases[s]].makespan * (1.0 + 1E-12))
+				if (valid && bases[s] >= 0 && results[bases[s]].scheduled && results[bases[s]].n_violations == 0 && results[s].makespan > results[bases[s]].makespan * (1.0 + 1E-12))
 				{
 					printf("  NOTE: %s is slower than %s\n", strategy_names[s], strategy_names[bases[s]]);
 					n_commute_slower++;
@@ -543,6 +559,7 @@ int main
 
 	printf("%d mismatches between the fast and baseline schedules, %d invalid schedules, %d programs whose arrival times disagree with their moves, %d schedules which break the order of the circuit\n", n_mismatches, n_worse, n_timing, n_order);
 	printf("%d schedules slower than rounds, and %d with commuting operations moved slower than without (reported, not failed)\n", n_slower, n_commute_slower);
+	printf("%d schedules break the rules of shuttling (check_schedule_trace), and %d of the original (baseline and fast) schedules do (reported, not failed)\n", n_violating, n_original_violating);
 
-	return (n_mismatches > 0 || n_worse > 0 || n_timing > 0 || n_order > 0);
+	return (n_mismatches > 0 || n_worse > 0 || n_timing > 0 || n_order > 0 || n_violating > 0);
 }

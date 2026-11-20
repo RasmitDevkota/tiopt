@@ -367,6 +367,99 @@ static int assign_layer_zones
     return status;
 }
 
+// Transport the ions of the operations of a round into the zones assigned to them together, in an order in which every
+// zone has room for the ions coming into it when they arrive (the assignment counts on the ions of the round leaving
+// their zones, so an operation waits for the ions in its zone to leave first). When full zones would exchange ions, so
+// that no order works, an ion which another operation takes elsewhere moves into storage first. Sets the round of each
+// operation
+static void transport_round_in_order
+(
+    struct TrapGraph *trapGraph,
+    struct CircuitGraph *circuitGraph,
+    struct ZoneNode **ion_states,
+    int *round_ops,
+    struct ZoneNode **op_zones,
+    int n_round,
+    int round,
+    int *rounds,
+    struct TransportProgram *transportProgram,
+    struct ScheduleTrace *trace
+)
+{
+    int n_ions = transportProgram->n_ions;
+    int *moved = calloc(MAX(n_round, 1), sizeof(int));
+    int *keep = malloc(MAX(n_ions, 1) * sizeof(int));
+
+    for (int n_moved = 0; n_moved < n_round; n_moved++) {
+        int pick = -1;
+
+        for (int attempt = 0; attempt < 2 && pick < 0; attempt++) {
+            for (int k = 0; k < n_round && pick < 0; k++) {
+                if (moved[k]) {
+                    continue;
+                }
+
+                struct InstructionNode *instr = &circuitGraph->instruction_nodes[round_ops[k]];
+                int n_present = 0;
+                for (int t = 0; t < instr->n_target_ions; t++) {
+                    n_present += (ion_states[instr->target_ions[t] - 1] == op_zones[k]);
+                }
+
+                if (op_zones[k]->zone_occupancy - n_present + instr->n_target_ions <= op_zones[k]->zone_capacity) {
+                    pick = k;
+                }
+            }
+
+            if (pick >= 0 || attempt == 1) {
+                break;
+            }
+
+            // Full zones exchange ions: move an ion which waits in the zone of the first operation left, but which
+            // another operation takes elsewhere, into storage
+            int first = 0;
+            while (moved[first]) {
+                first++;
+            }
+
+            int blocking = -1;
+            for (int k = 0; k < n_round && blocking < 0; k++) {
+                if (moved[k] || k == first || op_zones[k] == op_zones[first]) {
+                    continue;
+                }
+
+                struct InstructionNode *instr = &circuitGraph->instruction_nodes[round_ops[k]];
+                for (int t = 0; t < instr->n_target_ions && blocking < 0; t++) {
+                    if (ion_states[instr->target_ions[t] - 1] == op_zones[first]) {
+                        blocking = instr->target_ions[t] - 1;
+                    }
+                }
+            }
+
+            if (blocking >= 0) {
+                for (int i = 0; i < n_ions; i++) {
+                    keep[i] = (i != blocking);
+                }
+                release_ions(trapGraph, ion_states, n_ions, keep, trace);
+            }
+        }
+
+        // No order works and nothing could be moved out of the way: go on in order, as before
+        if (pick < 0) {
+            pick = 0;
+            while (moved[pick]) {
+                pick++;
+            }
+        }
+
+        moved[pick] = 1;
+        rounds[round_ops[pick]] = round;
+        transport_ions(trapGraph, ion_states, &circuitGraph->instruction_nodes[round_ops[pick]], round_ops[pick], op_zones[pick], transportProgram, trace);
+    }
+
+    free(keep);
+    free(moved);
+}
+
 // Scheduler which visits the instructions of each layer through the circuit sorted by layer; with SCHEDULE_FAST it gives
 // the same schedule as schedule_baseline, while the other strategies split each layer into rounds which fit in the
 // zones, SCHEDULE_LOOKAHEAD and SCHEDULE_LAYER_ASSIGN leave ions in their zone for an operation at most lookahead_layers
@@ -560,10 +653,7 @@ static int schedule_sorted
                         }
                     }
 
-                    for (int k = 0; k < n_round; k++) {
-                        rounds[round_ops[k]] = n_rounds;
-                        transport_ions(trapGraph, ion_states, &circuitGraph->instruction_nodes[round_ops[k]], round_ops[k], op_zones[k], transportProgram, trace);
-                    }
+                    transport_round_in_order(trapGraph, circuitGraph, ion_states, round_ops, op_zones, n_round, n_rounds, rounds, transportProgram, trace);
                 } else {
                     // Nearest zone for each operation in turn, leaving the operations which do not fit for the next round
                     int released = 0;

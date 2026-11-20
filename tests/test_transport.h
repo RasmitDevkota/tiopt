@@ -60,6 +60,16 @@ int test_schedule_through_junction
 	double atol
 );
 
+int test_three_ion_schedule_by_hand
+(
+	double atol
+);
+
+int test_schedule_check_finds_violations
+(
+	double atol
+);
+
 int test_lookahead_layers
 (
 	double atol

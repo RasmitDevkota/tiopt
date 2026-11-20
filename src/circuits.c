@@ -737,12 +737,49 @@ static int shuttle_ion
 	return 0;
 }
 
+// Whether the moves of a round which are not done yet fit in the zones one after another in the order of the trace,
+// starting from the chains as they are (after making move first, if it is not -1), so that no zone ever holds more
+// ions than its capacity between moves
+static int round_moves_fit
+(
+	struct ShuttleState *state,
+	int *round_moves,
+	int n_round_moves,
+	int *done,
+	int first,
+	int *counts
+)
+{
+	struct ZoneNode *zones = state->trap_graph->zone_nodes;
+	memcpy(counts, state->chain_lengths, state->n_zones * sizeof(int));
+
+	for (int k = -1; k < n_round_moves; k++)
+	{
+		int m = (k < 0) ? first : round_moves[k];
+		if (m < 0 || (k >= 0 && (done[m] || m == first)))
+			continue;
+
+		struct IonMove *move = &state->trace->moves[m];
+		if (move->from_zone == move->to_zone)
+			continue;
+
+		if (counts[move->to_zone] + 1 > zones[move->to_zone].zone_capacity)
+			return 0;
+
+		counts[move->to_zone]++;
+		counts[move->from_zone]--;
+	}
+
+	return 1;
+}
+
 // Time every move of a schedule trace (whose transport_rounds and n_rounds are set) and the arrival time of every
 // transport of its program, carrying out each move along the segments of the trap graph (see shuttle_ion) with the
 // durations of a cost model (or of default_transport_cost_model if it is NULL), and recording every step in the trace.
 // Each round first moves ions back into storage (in the order of the trace), then moves the ions of its operations into
 // their zones (ions at the end of their chain first, and the longest moves first among them), keeping the moves of each
-// ion in the order of the trace, and then runs its operations, which all start once every ion of the round has arrived and their zones are free, and last as long as the
+// ion in the order of the trace and never taking a move out of order if that would leave the rest without room in the
+// zones, and then runs its operations, which all start once every ion of the round has arrived and their zones are free, and last as long as the
 // slowest one. A move back into storage belongs to the round of the next transport after it in the trace, and those
 // after the last transport happen once the last round is done. Moves wait for each other only where they share a
 // segment or a zone, so a round lasts at least as long as when every ion moves at once along a straight line. Returns 1
@@ -863,6 +900,7 @@ int time_schedule_trace
 	}
 
 	int *done = calloc(MAX(n_moves, 1), sizeof(int));
+	int *counts = malloc(MAX(n_zones, 1) * sizeof(int));
 	int status = 0;
 
 	double time = 0.0;
@@ -873,6 +911,9 @@ int time_schedule_trace
 		// Moves of the round, each ion's in the order of the trace: moves back into storage first (in order), then moves
 		// into the zones of the operations, where the ion which needs the fewest swaps to reach the end of its chain goes
 		// first (and the one with the longest way to go among them), as long as its destination has room for it
+		int *moves_of_round = &round_moves[move_starts[round]];
+		int n_moves_of_round = move_starts[round + 1] - move_starts[round];
+
 		for (;;)
 		{
 			int best = -1;
@@ -880,6 +921,10 @@ int time_schedule_trace
 			int best_swaps = 0;
 			double best_length = 0.0;
 			int first = -1;
+
+			// If the rest of the round fits in the order of the trace (as the scheduler made it), a move may only go
+			// first if the rest still fits after it; otherwise its destination needs room for it
+			int fits_in_order = round_moves_fit(&state, moves_of_round, n_moves_of_round, done, -1, counts);
 
 			for (int k = move_starts[round]; k < move_starts[round + 1]; k++)
 			{
@@ -891,13 +936,18 @@ int time_schedule_trace
 				if (first < 0)
 					first = m;
 
+				if (move->from_zone != move->to_zone)
+				{
+					if (fits_in_order ? !round_moves_fit(&state, moves_of_round, n_moves_of_round, done, m, counts) :
+						state.chain_lengths[move->to_zone] >= trap_graph->zone_nodes[move->to_zone].zone_capacity)
+						continue;
+				}
+
 				int transport = (move->transport >= 0);
 				int swaps = 0;
 				double length = 0.0;
 				if (transport && move->from_zone != move->to_zone)
 				{
-					if (state.chain_lengths[move->to_zone] >= trap_graph->zone_nodes[move->to_zone].zone_capacity)
-						continue;
 
 					int position = chain_position(&state, move->from_zone, move->ion);
 					if (position >= 0 && trap_graph_route(trap_graph, move->from_zone, move->to_zone, state.path) >= 2)
@@ -961,6 +1011,7 @@ int time_schedule_trace
 		time = round_end;
 	}
 
+	free(counts);
 	free(done);
 	free(last_moves);
 	free(previous_moves);

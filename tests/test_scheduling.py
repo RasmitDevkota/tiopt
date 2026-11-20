@@ -233,3 +233,14 @@ def test_schedule_on_qccd_architecture(tmp_path):
     # Every trap of an architecture made only of gate traps would have to load and store ions
     with pytest.raises(ValueError):
         tiopt.TrapGraph.from_architecture(qccd.Architecture.linear(3, 4))
+
+
+def test_check_finds_no_violations_in_valid_schedules(circuit):
+    # Schedules of every strategy which splits layers into rounds keep the rules of shuttling, while the original
+    # strategies move ions away before their operations when a layer does not fit in the zones
+    for strategy in ("rounds", "lookahead", "layer-assign"):
+        program = tiopt.TransportProgram(tiopt.TrapGraph(ZONES, CAPACITIES, -150.0, 150.0), circuit, strategy, lookahead_layers=2)
+        assert program.check() == []
+    baseline = tiopt.TransportProgram(tiopt.TrapGraph(ZONES, CAPACITIES, -150.0, 150.0), circuit, "baseline")
+    violations = baseline.check()
+    assert violations and any("is not in the chain there" in v for v in violations)

@@ -612,6 +612,8 @@ _prototype("generate_trap_graph", None, C.c_int, _int_p, _int_p, _double_p, C.c_
 _prototype("trap_graph_distance", C.c_double, C.POINTER(TrapGraphStruct), C.c_int, C.c_int)
 _prototype("trap_graph_route", C.c_int, C.POINTER(TrapGraphStruct), C.c_int, C.c_int, _int_p)
 _prototype("default_transport_cost_model", TransportCostModelStruct)
+_prototype("check_schedule_trace", C.c_int, C.POINTER(TrapGraphStruct), C.POINTER(CircuitGraphStruct), C.POINTER(TransportProgramStruct),
+           C.POINTER(ScheduleTraceStruct), C.POINTER(TransportCostModelStruct), C.c_char_p, C.c_int)
 _prototype("free_circuit_graph", None, C.POINTER(CircuitGraphStruct))
 _prototype("free_transport_program", None, C.POINTER(TransportProgramStruct))
 _prototype("generate_transport_schedule_strategy", C.POINTER(TransportProgramStruct), C.POINTER(TrapGraphStruct), C.POINTER(CircuitGraphStruct), C.POINTER(TransportProgramStruct), C.c_int, C.POINTER(ScheduleTraceStruct))
@@ -2629,8 +2631,9 @@ class TransportProgram:
             _lib.free_schedule_trace(C.byref(self._trace))
             raise TiOptError("failed to schedule transports (check zone types and capacities)")
         self._pointer = pointer
-        # The zones of the moves belong to the trap graph
+        # The zones of the moves belong to the trap graph, and the checker reads the circuit
         self.trap_graph = trap_graph
+        self._circuit = circuit
 
     def close(self):
         """Free the memory of the transport program."""
@@ -2689,6 +2692,26 @@ class TransportProgram:
         """
         return [ScheduleStep(SCHEDULE_STEP_TYPES[st.type], st.ion, st.other_ion, st.zone, st.to_zone, st.index, st.start, st.end)
                 for st in (self._trace.steps[k] for k in range(self._trace.n_steps))]
+
+    def check(self):
+        """Check the schedule against the physical rules of shuttling, independently of the scheduler: ions move only
+        along the segments of the trap graph, one at a time on each, and never pass each other (only by merging into
+        a chain, swapping to its far end, and splitting off again); they split off, swap, and merge only at the ends of
+        chains; zones hold no more ions than their capacity between moves; every operation finds its ions in a zone of
+        its type; and no step is shorter than in the default cost model.
+
+        Returns:
+            Descriptions of the violations found (the first ten, and how many more there are), or [] if there are none.
+        """
+        buffer = C.create_string_buffer(4096)
+        cost_model = _lib.default_transport_cost_model()
+        n = _lib.check_schedule_trace(C.byref(self.trap_graph.struct), self._circuit._pointer, self._pointer,
+                                      C.byref(self._trace), C.byref(cost_model), buffer, len(buffer))
+        flush_c_output()
+        messages = [line for line in buffer.value.decode(errors="replace").splitlines() if line]
+        if n > len(messages):
+            messages.append(f"... and {n - len(messages)} more")
+        return messages
 
     @property
     def initial_zones(self):

@@ -10,6 +10,7 @@
 #include "transport.h"
 #include "circuits.h"
 #include "zones.h"
+#include "schedule_check.h"
 #include "test_utils.h"
 #include <dirent.h>
 
@@ -33,6 +34,8 @@ int test_all_transport
 	result += test_schedule_trace_times(atol);
 	result += test_trap_graph_routes(atol);
 	result += test_schedule_through_junction(atol);
+	result += test_three_ion_schedule_by_hand(atol);
+	result += test_schedule_check_finds_violations(atol);
 	result += test_lookahead_layers(atol);
 	result += test_commuting_layers(atol);
 
@@ -882,4 +885,261 @@ int test_commuting_layers
 	free_circuit_graph(circuit_graph);
 
 	return check_error("compute_commuting_layers moves commuting operations into fewer layers", n_wrong, 0);
+}
+
+// Schedule a circuit written to a file on a trap graph, returning NULL if it fails
+static struct TransportProgram* schedule_text
+(
+	const char *qasm,
+	struct TrapGraph *trap_graph,
+	enum ScheduleStrategy strategy,
+	struct CircuitGraph **circuit_graph,
+	struct ScheduleTrace *trace
+)
+{
+	char *filename = "check_test.qasm";
+	FILE *fp = fopen(filename, "w");
+	fputs(qasm, fp);
+	fclose(fp);
+
+	*circuit_graph = parse_qasm(filename);
+	remove(filename);
+	if (*circuit_graph == NULL)
+		return NULL;
+
+	struct TransportProgram *program = calloc(1, sizeof(struct TransportProgram));
+	if (generate_transport_schedule_strategy(trap_graph, *circuit_graph, program, strategy, trace) == NULL)
+	{
+		free_transport_program(program);
+		return NULL;
+	}
+
+	return program;
+}
+
+// Storage (zone 1), an empty zone, a gate zone and a measurement zone 100 µm apart, holding 3, 2, 2 and 3 ions
+static void generate_check_graph
+(
+	struct TrapGraph *trap_graph
+)
+{
+	enum ZoneType zone_types[4] = { LOAD_ZONE | STORAGE_ZONE, EMPTY_ZONE, GATE_ZONE, MEASURE_ZONE };
+	int zone_capacities[4] = { 3, 2, 2, 3 };
+	generate_linear_trap_graph(4, zone_types, zone_capacities, 0.0, 300.0, ION_HEIGHT, trap_graph);
+}
+
+int test_three_ion_schedule_by_hand
+(
+	double atol
+)
+{
+	// Three ions start in storage (zone 1) in the chain [1, 2, 3], whose front faces the empty zone (zone 2); zones are
+	// 100 µm apart, so a segment takes 100 µs at the speed limit. A cx gate on ions 1 and 2 and a measurement of ion 3
+	// run in the same round:
+	// - Ion 1 is at the front, so it splits off at 0 and reaches the gate zone (zone 3) at 200 µs
+	// - Ion 2 splits off next, and follows a segment behind, waiting for each segment and zone to be free; it reaches
+	//   the gate zone at 300 µs and merges into the front of the chain there: [2, 1]
+	// - Ion 3 is left alone in storage, so it sets off without splitting once storage is free (at 100 µs), and follows
+	//   a segment behind ion 2. To reach the measurement zone (zone 4) it passes the chain in the gate zone: it merges
+	//   into its front at 400 µs, swaps past ions 2 and 1 to the back, splits off, and arrives at 500 µs
+	// - The gate (GATE_DURATION, 100 µs) and the measurement (DETECTION_DURATION, 200 µs) start at 500 µs, so the round
+	//   ends at 700 µs
+	// - Back into storage: ion 1 swaps with ion 2 to reach the front of the gate chain, splits off at 700 µs and arrives
+	//   at 900 µs; ion 2 follows a segment behind (1000 µs) and merges into the front of storage: [2, 1]; ion 3 waits
+	//   for the gate zone to be free at 800 µs and arrives at 1100 µs, merging into the front: [3, 2, 1]
+	struct TrapGraph trap_graph;
+	generate_check_graph(&trap_graph);
+
+	struct CircuitGraph *circuit_graph;
+	struct ScheduleTrace trace = { 0 };
+	struct TransportProgram *program = schedule_text("qubit[3] qreg;\nbit[3] creg;\ncx qreg[0], qreg[1];\nmeasure qreg[2] -> creg[2];\n",
+		&trap_graph, SCHEDULE_ROUNDS, &circuit_graph, &trace);
+
+	int n_wrong = (program == NULL);
+	if (program != NULL)
+	{
+		double us = 1E-6;
+		double eps = 1E-12;
+
+		n_wrong += (program->n_ions != 3) + (trace.n_moves != 6) + (trace.n_rounds != 1);
+		n_wrong += (fabs(program->arrival_times[0] - 500 * us) > eps) + (fabs(program->arrival_times[1] - 500 * us) > eps);
+
+		int expected_ions[6] = { 1, 2, 3, 1, 2, 3 };
+		double expected_departures[6] = { 0, 0, 100, 700, 700, 700 };
+		double expected_arrivals[6] = { 200, 300, 500, 900, 1000, 1100 };
+		int expected_swaps[6] = { 0, 0, 2, 1, 0, 0 };
+		int swaps[6] = { 0 };
+		int n_splits = 0;
+		int n_merges = 0;
+		for (int k = 0; k < trace.n_steps; k++)
+		{
+			struct TransportStep *step = &trace.steps[k];
+			if (step->type == STEP_ION_SWAP && step->index < 6)
+				swaps[step->index]++;
+			n_splits += (step->type == STEP_SPLIT);
+			n_merges += (step->type == STEP_MERGE);
+		}
+
+		for (int m = 0; m < MIN(trace.n_moves, 6); m++)
+		{
+			n_wrong += (trace.moves[m].ion != expected_ions[m]) + (swaps[m] != expected_swaps[m]);
+			n_wrong += (fabs(trace.moves[m].depart - expected_departures[m] * us) > eps);
+			n_wrong += (fabs(trace.moves[m].arrive - expected_arrivals[m] * us) > eps);
+		}
+		n_wrong += (n_splits != 4) + (n_merges != 4);
+
+		n_wrong += (check_schedule_trace(&trap_graph, circuit_graph, program, &trace, NULL, NULL, 0) != 0);
+
+		free_transport_program(program);
+	}
+
+	free_schedule_trace(&trace);
+	if (circuit_graph != NULL)
+		free_circuit_graph(circuit_graph);
+	free_trap_graph(&trap_graph);
+
+	return check_error("a three-ion schedule matches its timing by hand and passes the checker", n_wrong, 0);
+}
+
+// Remove the steps of a trace for which a predicate holds
+static void remove_steps
+(
+	struct ScheduleTrace *trace,
+	int (*remove)(struct TransportStep *step, int arg),
+	int arg
+)
+{
+	int n = 0;
+	for (int k = 0; k < trace->n_steps; k++)
+		if (!remove(&trace->steps[k], arg))
+			trace->steps[n++] = trace->steps[k];
+
+	trace->n_steps = n;
+}
+
+static int is_swap
+(
+	struct TransportStep *step,
+	int arg
+)
+{
+	return step->type == STEP_ION_SWAP;
+}
+
+// Steps of the move arg in zone 3, except moves along segments
+static int passes_storage
+(
+	struct TransportStep *step,
+	int arg
+)
+{
+	return step->index == arg && step->zone == 2 && step->type != STEP_MOVE && step->type != STEP_OPERATION;
+}
+
+// Whether checking a trace finds violations, one of which is described by a phrase
+static int finds
+(
+	struct TrapGraph *trap_graph,
+	struct CircuitGraph *circuit_graph,
+	struct TransportProgram *program,
+	struct ScheduleTrace *trace,
+	const char *phrase
+)
+{
+	char message[4096];
+	int n = check_schedule_trace(trap_graph, circuit_graph, program, trace, NULL, message, sizeof(message));
+
+	return n > 0 && strstr(message, phrase) != NULL;
+}
+
+int test_schedule_check_finds_violations
+(
+	double atol
+)
+{
+	int n_wrong = 0;
+
+	struct TrapGraph trap_graph;
+	generate_check_graph(&trap_graph);
+
+	struct CircuitGraph *circuit_graph;
+	struct ScheduleTrace trace = { 0 };
+	struct TransportProgram *program = schedule_text("qubit[3] qreg;\ncx qreg[0], qreg[1];\n", &trap_graph, SCHEDULE_ROUNDS, &circuit_graph, &trace);
+
+	if (program == NULL)
+		n_wrong++;
+	else
+	{
+		struct ScheduleTrace broken = trace;
+		broken.steps = malloc(trace.n_steps * sizeof(struct TransportStep));
+
+		// Ion 1 leaves the gate zone without swapping past ion 2, which is in its way
+		memcpy(broken.steps, trace.steps, trace.n_steps * sizeof(struct TransportStep));
+		remove_steps(&broken, is_swap, 0);
+		n_wrong += !finds(&trap_graph, circuit_graph, program, &broken, "from the middle, or from the end");
+
+		// Ion 2 sets off while ion 1 is still on the first segment
+		memcpy(broken.steps, trace.steps, trace.n_steps * sizeof(struct TransportStep));
+		broken.n_steps = trace.n_steps;
+		for (int k = 0; k < broken.n_steps; k++)
+			if (broken.steps[k].type == STEP_MOVE && broken.steps[k].ion == 2 && broken.steps[k].zone == 0)
+			{
+				broken.steps[k].start -= 50E-6;
+				broken.steps[k].end -= 50E-6;
+			}
+		n_wrong += !finds(&trap_graph, circuit_graph, program, &broken, "take up the segment between zones 1 and 2 at once");
+
+		// Ion 1 jumps straight from storage to the gate zone
+		memcpy(broken.steps, trace.steps, trace.n_steps * sizeof(struct TransportStep));
+		for (int k = 0; k < broken.n_steps; k++)
+			if (broken.steps[k].type == STEP_MOVE && broken.steps[k].ion == 1 && broken.steps[k].zone == 0)
+				broken.steps[k].to_zone = 2;
+		n_wrong += !finds(&trap_graph, circuit_graph, program, &broken, "which are not joined by a segment");
+
+		// The gate starts before ion 2 arrives
+		memcpy(broken.steps, trace.steps, trace.n_steps * sizeof(struct TransportStep));
+		double arrival = program->arrival_times[0];
+		program->arrival_times[0] -= 50E-6;
+		n_wrong += !finds(&trap_graph, circuit_graph, program, &broken, "starts before ion 2 arrives");
+		program->arrival_times[0] = arrival;
+
+		// The gate zone only holds one ion
+		trap_graph.zone_nodes[2].zone_capacity = 1;
+		n_wrong += !finds(&trap_graph, circuit_graph, program, &trace, "more than its capacity of 1");
+		trap_graph.zone_nodes[2].zone_capacity = 2;
+
+		free(broken.steps);
+		free_transport_program(program);
+	}
+
+	free_schedule_trace(&trace);
+	if (circuit_graph != NULL)
+		free_circuit_graph(circuit_graph);
+	free_trap_graph(&trap_graph);
+
+	// In the schedule of time_schedule_trace's test, ion 3 passes through the chain of ions 1 and 2 in storage on its
+	// way to the gate zone; without merging into it and swapping past them, it goes straight through them
+	enum ZoneType zone_types[7] = { LOAD_ZONE, EMPTY_ZONE, STORAGE_ZONE, EMPTY_ZONE, GATE_ZONE, EMPTY_ZONE, MEASURE_ZONE };
+	int zone_capacities[7] = { 5, 3, 10, 3, 2, 3, 4 };
+	generate_linear_trap_graph(7, zone_types, zone_capacities, -150.0, 150.0, ION_HEIGHT, &trap_graph);
+
+	circuit_graph = parse_qasm("quantumcircuits/test_0000.qasm");
+	trace = (struct ScheduleTrace) { 0 };
+	program = calloc(1, sizeof(struct TransportProgram));
+	if (generate_transport_schedule_strategy(&trap_graph, circuit_graph, program, SCHEDULE_ROUNDS, &trace) == NULL)
+		n_wrong++;
+	else
+	{
+		n_wrong += (check_schedule_trace(&trap_graph, circuit_graph, program, &trace, NULL, NULL, 0) != 0);
+
+		remove_steps(&trace, passes_storage, 4);
+		n_wrong += !finds(&trap_graph, circuit_graph, program, &trace, "passes through the chain of 2 ions in zone 3");
+	}
+
+	free_schedule_trace(&trace);
+	free_transport_program(program);
+	free_circuit_graph(circuit_graph);
+	free_trap_graph(&trap_graph);
+
+	return check_error("check_schedule_trace finds ions passing, colliding, jumping, early and over capacity", n_wrong, 0);
 }

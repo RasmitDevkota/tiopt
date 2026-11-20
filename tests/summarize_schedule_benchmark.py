@@ -30,7 +30,7 @@ def load(filename):
     cases = defaultdict(dict)
     with open(filename) as f:
         for row in csv.DictReader(f):
-            row["valid"] = row["scheduled"] == "1" and row["invalid"] == "0"
+            row["valid"] = row["scheduled"] == "1" and row["invalid"] == "0" and row.get("violations", "0") == "0"
             for key in ("makespan_us", "distance_um", "run_time_us"):
                 row[key] = float(row[key])
             cases[(row["circuit"], row["layout"])][row["strategy"]] = row
