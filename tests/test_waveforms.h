@@ -44,3 +44,8 @@ int test_schedule_trace_to_waveform
 (
 	double atol
 );
+
+int test_schedule_steps_to_waveform
+(
+	double atol
+);

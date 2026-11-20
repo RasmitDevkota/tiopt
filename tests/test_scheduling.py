@@ -63,25 +63,55 @@ def test_schedule_without_measure_zone_fails(circuit):
         tiopt.TransportProgram(trap_graph, circuit)
 
 
-def test_waveform_for_schedule(solved_trap, ion, circuit):
+@pytest.mark.parametrize("swap_type", ["gate", "ion"])
+def test_waveform_for_schedule(solved_trap, ion, circuit, swap_type):
+    from tiopt import qccd
+
     null = solved_trap.find_rf_null((0.0, 0.0, None))
-    trap_graph = tiopt.TrapGraph(ZONES, CAPACITIES, -150.0, 150.0, null[2])
-    program = tiopt.TransportProgram(trap_graph, circuit)
+    trap_graph = tiopt.TrapGraph(["load", "storage", "gate", "gate", "measure"], [4, 4, 2, 2, 4], -150.0, 150.0, null[2])
+    # Ions kept in the first gate zone make others pass through them on the way to the second, reordering with SWAP
+    # gates where gates can be done (the default), or by swapping ions physically everywhere
+    cost_model = tiopt.transport_cost_model(qccd.TimingModel(swap_type=swap_type))
+    program = tiopt.TransportProgram(trap_graph, circuit, "lookahead", cost_model=cost_model)
     waveform = tiopt.Waveform.from_program(solved_trap, ion, program, 21)
     assert waveform.n_wells == 4
-    # 21 steps over every move which takes time, where moves which happen at once share their steps
-    moving = [m for m in program.moves if m.arrive > m.depart]
-    assert 21 <= waveform.n_steps <= 21 * len(moving)
     assert np.all(np.diff(waveform.times) > 0)
-    # Every move, including the moves back into storage, brings its ion to the center of its zone when it arrives
-    for move in moving:
-        step = int(np.argmin(np.abs(waveform.times - move.arrive)))
-        assert waveform.times[step] == pytest.approx(move.arrive)
-        assert waveform.well_positions[step, move.ion - 1, 0] == pytest.approx(trap_graph.positions[move.to_zone, 0])
-    # Every ion is in the measure zone for the measurement, and back in storage at the end
+    x = trap_graph.positions[:, 0]
+    steps = program.steps
+    # Each well follows the steps of its ion: it moves only along the segments while its ion moves, and holds still at
+    # the center of its zone through splits, merges, swaps, operations, and waits
+    expected = np.repeat(program.initial_positions[None, :, 0], waveform.n_steps, axis=0)
+    for step in sorted((st for st in steps if st.type == "move"), key=lambda st: st.start):
+        u = np.clip((waveform.times - step.start) / (step.end - step.start), 0.0, 1.0)
+        during = waveform.times > step.start
+        position = x[step.zone] + u**3 * (10 - 15 * u + 6 * u * u) * (x[step.to_zone] - x[step.zone])
+        expected[during, step.ion - 1] = position[during]
+    np.testing.assert_allclose(waveform.well_positions[:, :, 0], expected, atol=1e-9)
+    # The waveform holds through every other step, with a step at its start and end, until the last operation is done
+    for step in steps:
+        if step.type in ("split", "merge", "ion swap", "gate swap"):
+            for t in (step.start, step.end):
+                k = int(np.argmin(np.abs(waveform.times - t)))
+                assert waveform.times[k] == pytest.approx(t)
+                for ion_ in (step.ion, step.other_ion):
+                    if ion_:
+                        assert waveform.well_positions[k, ion_ - 1, 0] == pytest.approx(x[step.zone])
+    assert waveform.times[-1] == pytest.approx(program.duration)
+    # A physical swap of the two ions of a chain turns their well by pi, and nothing else turns a well
+    turns = np.zeros(4)
+    for step in steps:
+        k0 = int(np.argmin(np.abs(waveform.times - step.start)))
+        k1 = int(np.argmin(np.abs(waveform.times - step.end)))
+        here = np.abs(waveform.well_positions[k0, :, 0] - x[step.zone]) < 1e-6
+        if step.type == "ion swap" and here.sum() == 2:
+            for ion_ in (step.ion, step.other_ion):
+                turns[ion_ - 1] += np.pi
+                assert waveform.well_angles[k1, ion_ - 1] - waveform.well_angles[k0, ion_ - 1] == pytest.approx(np.pi)
+    np.testing.assert_allclose(waveform.well_angles[-1], turns)
+    assert (turns.sum() > 0) == (swap_type == "ion")
+    # Every ion is in the measure zone for the measurement
     measurement = int(np.argmin(np.abs(waveform.times - program.arrival_times[-1])))
     np.testing.assert_allclose(waveform.well_positions[measurement, :, 0], 150.0)
-    np.testing.assert_allclose(waveform.well_positions[-1, :, 0], -50.0)
 
 
 def test_program_times_every_move(circuit):

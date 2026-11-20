@@ -45,6 +45,34 @@ def test_fast_transport_excites_ion(solved_trap, ion):
     assert quanta > 100
 
 
+def test_turned_well_swaps_two_ions(solved_trap, ion):
+    from tiopt import crystals, dynamics, lib
+
+    # A well holding two ions turns by pi in the x-y plane over 10 µs (between holds of 1 µs), with its voltages
+    # updated every 50 ns
+    center = solved_trap.find_rf_null((0.0, 0.0, None))
+    times = np.linspace(0.0, 12e-6, 241)
+    u = np.clip((times - 1e-6) / 10e-6, 0.0, 1.0)
+    angles = np.pi * u**3 * (10 - 15 * u + 6 * u * u)
+    wells = np.repeat(center[None, None, :], len(times), axis=0)
+    waveform = tiopt.Waveform.from_wells(solved_trap, ion, times, wells, well_angles=angles[:, None])
+    np.testing.assert_allclose(waveform.well_angles[:, 0], angles)
+    # The weakest mode of the well follows its axial direction, at the target frequency
+    middle = int(np.argmin(np.abs(times - 6e-6)))
+    omega, axes = solved_trap.normal_modes(ion, center, waveform.voltages[middle])
+    assert abs(axes[np.argmin(omega)][1]) == pytest.approx(1.0, abs=1e-6)
+    assert np.min(omega) == pytest.approx(tiopt.AXIAL_FREQUENCY, rel=1e-2)
+
+    crystal = crystals.find_crystal(solved_trap, ion, 2, voltages=waveform.voltages[0], position=center)
+    result = dynamics.simulate(solved_trap, [ion, ion], crystal.positions, duration=12e-6, waveform=waveform, dt=2e-9)
+    # Halfway, the crystal lies across the trap axis, and at the end each ion is where the other started, at rest
+    halfway = result.positions[int(np.argmin(np.abs(result.times - 6e-6)))]
+    axis = (halfway[1] - halfway[0]) / np.linalg.norm(halfway[1] - halfway[0])
+    assert abs(axis[1]) > 0.99
+    np.testing.assert_allclose(result.positions[-1], crystal.positions[::-1], atol=0.01)
+    assert result.kinetic_energy()[-1] < 0.01 * lib.HBAR * tiopt.AXIAL_FREQUENCY
+
+
 def test_voltages_at_interpolates_linearly(solved_trap, ion):
     start = solved_trap.find_rf_null((-10.0, 0.0, None))
     end = solved_trap.find_rf_null((10.0, 0.0, None))

@@ -2,14 +2,16 @@
 
 #include "data_structures.h"
 
-// Linear constraints which place a potential well at a position, with the trap axis (x) as the axial direction
+// Linear constraints which place a potential well at a position, with the trap axis (x) as the axial direction unless
+// the well is turned by an angle in the x-y plane, in which case the Hessian constraints are taken in the frame of the
+// well (its axial direction, the radial direction across it in the x-y plane, and z)
 enum WaveformConstraintType
 {
 	CONSTRAINT_EX_FIELD_X,
 	CONSTRAINT_EX_FIELD_Y,
 	CONSTRAINT_EX_FIELD_Z,
-	CONSTRAINT_HESSIAN_XY,
-	CONSTRAINT_HESSIAN_XZ,
+	CONSTRAINT_HESSIAN_XY, // between the axial direction and the radial direction across it in the x-y plane
+	CONSTRAINT_HESSIAN_XZ, // between the axial direction and z
 	CONSTRAINT_AXIAL_CURVATURE,
 	N_WELL_CONSTRAINTS,
 };
@@ -85,6 +87,7 @@ void build_well_constraints
 	const double q,
 	double position[3],
 	const double omega_axial,
+	const double angle,
 	double *rows,
 	double *targets
 );
@@ -97,6 +100,20 @@ int solve_waveform
 	int n_steps,
 	int n_wells,
 	double (*well_positions)[3],
+	const double omega_axial,
+	const double roughness_weight,
+	double *voltages
+);
+
+int solve_rotated_waveform
+(
+	struct Trap *trap,
+	const double m,
+	const double q,
+	int n_steps,
+	int n_wells,
+	double (*well_positions)[3],
+	double *well_angles,
 	const double omega_axial,
 	const double roughness_weight,
 	double *voltages

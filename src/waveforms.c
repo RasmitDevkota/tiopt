@@ -31,6 +31,7 @@ struct TransportWaveform* allocate_transport_waveform
 	waveform->voltages = calloc(n_waveform_steps * n_electrodes, sizeof(double));
 	waveform->times = calloc(n_waveform_steps, sizeof(double));
 	waveform->well_positions = calloc(n_waveform_steps * n_wells, sizeof(double[3]));
+	waveform->well_angles = calloc(MAX(n_waveform_steps * n_wells, 1), sizeof(double));
 
 	return waveform;
 }
@@ -47,7 +48,58 @@ void free_transport_waveform
 	free(waveform->voltages);
 	free(waveform->times);
 	free(waveform->well_positions);
+	free(waveform->well_angles);
 	free(waveform);
+}
+
+// Angle of the axial direction of a well of a waveform at a step (rad), which is 0 if the waveform has no angles
+static double well_angle
+(
+	struct TransportWaveform *waveform,
+	int step,
+	int well
+)
+{
+	return (waveform->well_angles != NULL) ? waveform->well_angles[step * waveform->n_wells + well] : 0.0;
+}
+
+// Curvature of a Hessian between two directions, a^T H b
+static double directional_curvature
+(
+	double H[3][3],
+	double a[3],
+	double b[3]
+)
+{
+	double value = 0.0;
+	for (int i = 0; i < 3; i++)
+		for (int j = 0; j < 3; j++)
+			value += a[i] * H[i][j] * b[j];
+
+	return value;
+}
+
+// Axial direction of a well turned by an angle from the trap axis (x) in the x-y plane, the radial direction across it
+// in the x-y plane, and z
+static void well_axes
+(
+	const double angle,
+	double axial[3],
+	double across[3],
+	double vertical[3]
+)
+{
+	axial[0] = cos(angle);
+	axial[1] = sin(angle);
+	axial[2] = 0.0;
+
+	across[0] = -sin(angle);
+	across[1] = cos(angle);
+	across[2] = 0.0;
+
+	vertical[0] = 0.0;
+	vertical[1] = 0.0;
+	vertical[2] = 1.0;
 }
 
 // Cost function for the DC voltages of every step of a waveform, laid out as n_steps-by-n_voltages
@@ -181,8 +233,10 @@ void waveform_potential_derivatives
 }
 
 // Build the constraints, linear in the DC voltages, which place a potential well at a position: no net force on the
-// ion, the trap axis (x) as a principal axis, and the target axial curvature. The rows are scaled by ION_HEIGHT so that
-// every constraint is measured in volts. rows has length N_WELL_CONSTRAINTS-by-n_electrodes_dc
+// ion, the axial direction of the well as a principal axis, and the target axial curvature along it. The axial direction
+// is the trap axis (x) turned by an angle in the x-y plane (0 for a well along the trap axis), so that turning a well
+// holding two ions by pi swaps them. The rows are scaled by ION_HEIGHT so that every constraint is measured in volts.
+// rows has length N_WELL_CONSTRAINTS-by-n_electrodes_dc
 void build_well_constraints
 (
 	struct Trap *trap,
@@ -190,6 +244,7 @@ void build_well_constraints
 	const double q,
 	double position[3],
 	const double omega_axial,
+	const double angle,
 	double *rows,
 	double *targets
 )
@@ -198,6 +253,11 @@ void build_well_constraints
 	int n_rf = trap->n_electrodes_rf;
 
 	double L_c = ION_HEIGHT;
+
+	double axial[3];
+	double across[3];
+	double vertical[3];
+	well_axes(angle, axial, across, vertical);
 
 	// Every electrode's derivatives come from the same solid harmonics
 	double (*grad_phi_all)[3] = malloc(trap->n_electrodes * sizeof(double[3]));
@@ -212,9 +272,9 @@ void build_well_constraints
 		rows[CONSTRAINT_EX_FIELD_X * n_dc + d] = grad_phi[0] * L_c;
 		rows[CONSTRAINT_EX_FIELD_Y * n_dc + d] = grad_phi[1] * L_c;
 		rows[CONSTRAINT_EX_FIELD_Z * n_dc + d] = grad_phi[2] * L_c;
-		rows[CONSTRAINT_HESSIAN_XY * n_dc + d] = H[0][1] * L_c*L_c;
-		rows[CONSTRAINT_HESSIAN_XZ * n_dc + d] = H[0][2] * L_c*L_c;
-		rows[CONSTRAINT_AXIAL_CURVATURE * n_dc + d] = H[0][0] * L_c*L_c;
+		rows[CONSTRAINT_HESSIAN_XY * n_dc + d] = directional_curvature(H, axial, across) * L_c*L_c;
+		rows[CONSTRAINT_HESSIAN_XZ * n_dc + d] = directional_curvature(H, axial, vertical) * L_c*L_c;
+		rows[CONSTRAINT_AXIAL_CURVATURE * n_dc + d] = directional_curvature(H, axial, axial) * L_c*L_c;
 	}
 
 	free(H_all);
@@ -231,9 +291,9 @@ void build_well_constraints
 	targets[CONSTRAINT_EX_FIELD_X] = -grad_U_pond[0] / q * L_c;
 	targets[CONSTRAINT_EX_FIELD_Y] = -grad_U_pond[1] / q * L_c;
 	targets[CONSTRAINT_EX_FIELD_Z] = -grad_U_pond[2] / q * L_c;
-	targets[CONSTRAINT_HESSIAN_XY] = -H_U_pond[0][1] / q * L_c*L_c;
-	targets[CONSTRAINT_HESSIAN_XZ] = -H_U_pond[0][2] / q * L_c*L_c;
-	targets[CONSTRAINT_AXIAL_CURVATURE] = (axial_curvature - H_U_pond[0][0]) / q * L_c*L_c;
+	targets[CONSTRAINT_HESSIAN_XY] = -directional_curvature(H_U_pond, axial, across) / q * L_c*L_c;
+	targets[CONSTRAINT_HESSIAN_XZ] = -directional_curvature(H_U_pond, axial, vertical) / q * L_c*L_c;
+	targets[CONSTRAINT_AXIAL_CURVATURE] = (axial_curvature - directional_curvature(H_U_pond, axial, axial)) / q * L_c*L_c;
 }
 
 // Add a value to element (i, j), with i >= j, of a symmetric matrix in GSL's banded format
@@ -260,6 +320,36 @@ int solve_waveform
 	int n_steps,
 	int n_wells,
 	double (*well_positions)[3],
+	const double omega_axial,
+	const double roughness_weight,
+	double *voltages
+)
+{
+	return solve_rotated_waveform(
+		trap,
+		m, q,
+		n_steps,
+		n_wells,
+		well_positions,
+		NULL,
+		omega_axial,
+		roughness_weight,
+		voltages
+	);
+}
+
+// Solve for the DC voltages of a waveform like solve_waveform, where the axial direction of every well at every step is
+// turned from the trap axis by an angle in the x-y plane (well_angles, of length n_steps-by-n_wells, or NULL for every
+// well along the trap axis)
+int solve_rotated_waveform
+(
+	struct Trap *trap,
+	const double m,
+	const double q,
+	int n_steps,
+	int n_wells,
+	double (*well_positions)[3],
+	double *well_angles,
 	const double omega_axial,
 	const double roughness_weight,
 	double *voltages
@@ -301,6 +391,7 @@ int solve_waveform
 				m, q,
 				well_positions[s * n_wells + w],
 				omega_axial,
+				(well_angles != NULL) ? well_angles[s * n_wells + w] : 0.0,
 				&rows[w * N_WELL_CONSTRAINTS * n_dc],
 				&targets[w * N_WELL_CONSTRAINTS]
 			);
@@ -413,6 +504,7 @@ int optimize_primitive
 				m, q,
 				waveform->well_positions[t * n_wells + w],
 				omega_axial,
+				well_angle(waveform, t, w),
 				&cx->rows[w * N_WELL_CONSTRAINTS * n_dc],
 				&cx->targets[w * N_WELL_CONSTRAINTS]
 			);
@@ -681,10 +773,86 @@ static int compare_doubles
 	return (x > y) - (x < y);
 }
 
-// Convert the timed moves of a schedule trace (see time_schedule_trace) into a waveform with a well for every ion,
-// where every move, including the moves back into storage, takes its ion between the centers of its zones along a
-// minimum-jerk profile from its departure to its arrival, so that moves which overlap in time happen at once, while
-// the ions which are not moving are held in place; each move takes n_steps_per_move steps. Returns NULL if no ion
+// Motion of a well in a waveform of a schedule between two times: a move from start to end along a minimum-jerk profile,
+// or a turn of its axial direction by an angle in the x-y plane (with start and end where the well is)
+struct WellMotion
+{
+	int well;
+	double t0;
+	double t1;
+	double start[3];
+	double end[3];
+	double turn; // angle the axial direction of the well turns through (rad)
+};
+
+// Order the motions of wells by well, and then by time
+static int compare_well_motions
+(
+	const void *a,
+	const void *b
+)
+{
+	const struct WellMotion *x = a;
+	const struct WellMotion *y = b;
+
+	if (x->well != y->well)
+		return (x->well > y->well) - (x->well < y->well);
+
+	return (x->t0 > y->t0) - (x->t0 < y->t0);
+}
+
+// Position of a well at a time, following its motions (motions[first] to motions[last - 1], sorted by time, which do not
+// overlap) from where it starts
+static void well_position_at
+(
+	struct WellMotion *motions,
+	int first,
+	int last,
+	double start[3],
+	const double t,
+	double position[3]
+)
+{
+	// Last motion which starts before the time
+	int lo = first - 1;
+	int hi = last;
+	while (hi - lo > 1)
+	{
+		int mid = (lo + hi) / 2;
+
+		if (motions[mid].t0 < t)
+			lo = mid;
+		else
+			hi = mid;
+	}
+
+	if (lo < first)
+	{
+		memcpy(position, start, sizeof(double[3]));
+		return;
+	}
+
+	struct WellMotion *motion = &motions[lo];
+	double u = (motion->t1 > motion->t0) ? MIN((t - motion->t0) / (motion->t1 - motion->t0), 1.0) : 1.0;
+	double fraction = transport_profile(u);
+
+	for (int k = 0; k < 3; k++)
+		position[k] = motion->start[k] + fraction * (motion->end[k] - motion->start[k]);
+}
+
+// Convert a schedule trace (see time_schedule_trace) into a waveform with a well for every ion. If the trace records the
+// steps of its moves, the wells follow them: each well moves only while its ion moves along a segment (from the center
+// of one zone to the next, along a minimum-jerk profile), and holds still through splits, merges, junction crossings,
+// SWAP gates and operations, and while its ion waits for a segment or a zone, so that the wells are where the ions are
+// at every moment. A physical swap of the two ions of a chain turns the axial direction of their well by pi in the x-y
+// plane over the whole swap (a two-ion chain has nothing to split off, so the split and merge of the swap leave the turn
+// more time), which brings each ion to where the other was; in a longer chain, the pair would first have to be split
+// into a well of its own, which the zones of a trap graph (a point each) do not resolve, so the well holds still there.
+// A trace without steps is followed move by move instead, where every move, including the moves back into storage,
+// takes its ion between the centers of its zones along a minimum-jerk profile from its departure to its arrival. Moves
+// which overlap in time happen at once, while the ions which are not moving are held in place, and each move along a
+// segment (or each move, without steps) and each turn takes n_steps_per_move steps, while every other step of the trace
+// adds a step at its start and its end (so the waveform lasts until the last operation ends). Returns NULL if no ion
 // moves or the voltages cannot be found
 struct TransportWaveform* schedule_trace_to_waveform
 (
@@ -699,23 +867,122 @@ struct TransportWaveform* schedule_trace_to_waveform
 {
 	int n_ions = transport_program->n_ions;
 	int n_steps_move = MAX(n_steps_per_move, 2);
+	struct ZoneNode *zones = trap_graph->zone_nodes;
 
-	// Steps over every move which takes time, without repeating the times moves share
-	int n_times = 0;
-	double *times = malloc(MAX(trace->n_moves * n_steps_move, 1) * sizeof(double));
-	for (int m = 0; m < trace->n_moves; m++)
+	// Moves of the wells, along the segments if the trace records its steps
+	int n_motions = 0;
+	struct WellMotion *motions = malloc(MAX(trace->n_moves + 3 * trace->n_steps, 1) * sizeof(struct WellMotion));
+
+	if (trace->n_steps > 0)
 	{
-		struct IonMove *move = &trace->moves[m];
-		if (move->from_zone == move->to_zone || move->arrive <= move->depart)
+		for (int k = 0; k < trace->n_steps; k++)
+		{
+			struct TransportStep *step = &trace->steps[k];
+			if (step->type != STEP_MOVE || step->end <= step->start || step->ion < 1 || step->ion > n_ions)
+				continue;
+
+			struct WellMotion *motion = &motions[n_motions++];
+			*motion = (struct WellMotion) { step->ion - 1, step->start, step->end, { 0.0 }, { 0.0 }, 0.0 };
+			memcpy(motion->start, zones[step->zone].position, sizeof(double[3]));
+			memcpy(motion->end, zones[step->to_zone].position, sizeof(double[3]));
+		}
+	}
+	else
+	{
+		for (int m = 0; m < trace->n_moves; m++)
+		{
+			struct IonMove *move = &trace->moves[m];
+			if (move->from_zone == move->to_zone || move->arrive <= move->depart)
+				continue;
+
+			struct WellMotion *motion = &motions[n_motions++];
+			*motion = (struct WellMotion) { move->ion - 1, move->depart, move->arrive, { 0.0 }, { 0.0 }, 0.0 };
+			memcpy(motion->start, zones[move->from_zone].position, sizeof(double[3]));
+			memcpy(motion->end, zones[move->to_zone].position, sizeof(double[3]));
+		}
+	}
+
+	qsort(motions, n_motions, sizeof(struct WellMotion), compare_well_motions);
+
+	// Motions of each well, which start at motions[well_starts[i]]
+	int *well_starts = calloc(n_ions + 1, sizeof(int));
+	for (int k = 0; k < n_motions; k++)
+		well_starts[motions[k].well + 1]++;
+	for (int i = 1; i <= n_ions; i++)
+		well_starts[i] += well_starts[i - 1];
+
+	// Physical swaps of the two ions of a chain turn their well, where the chain is every well at the center of the zone
+	int n_moves_only = n_motions;
+	double position[3];
+	for (int k = 0; k < trace->n_steps; k++)
+	{
+		struct TransportStep *step = &trace->steps[k];
+		if (step->type != STEP_ION_SWAP || step->end <= step->start)
 			continue;
 
-		for (int s = 0; s < n_steps_move; s++)
-			times[n_times++] = move->depart + (move->arrive - move->depart) * s / (n_steps_move - 1);
+		double *center = zones[step->zone].position;
+		double t = 0.5 * (step->start + step->end);
+
+		int n_here = 0;
+		for (int i = 0; i < n_ions; i++)
+		{
+			well_position_at(motions, well_starts[i], well_starts[i + 1], transport_program->initial_positions[i], t, position);
+			if (fabs(position[0] - center[0]) + fabs(position[1] - center[1]) + fabs(position[2] - center[2]) < 1E-6)
+				n_here++;
+		}
+
+		if (n_here != 2)
+			continue;
+
+		int pair[2] = { step->ion - 1, step->other_ion - 1 };
+		for (int p = 0; p < 2; p++)
+		{
+			struct WellMotion *motion = &motions[n_motions++];
+			*motion = (struct WellMotion) { pair[p], step->start, step->end, { 0.0 }, { 0.0 }, PI };
+			memcpy(motion->start, center, sizeof(double[3]));
+			memcpy(motion->end, center, sizeof(double[3]));
+		}
 	}
+
+	if (n_motions > n_moves_only)
+	{
+		qsort(motions, n_motions, sizeof(struct WellMotion), compare_well_motions);
+
+		memset(well_starts, 0, (n_ions + 1) * sizeof(int));
+		for (int k = 0; k < n_motions; k++)
+			well_starts[motions[k].well + 1]++;
+		for (int i = 1; i <= n_ions; i++)
+			well_starts[i] += well_starts[i - 1];
+	}
+
+	// Steps over every motion, and at the start and end of every other step of the trace (during which the wells hold
+	// still), without repeating the times they share
+	int n_times = 0;
+	double *times = malloc(MAX(n_motions * n_steps_move + 2 * trace->n_steps, 1) * sizeof(double));
+	for (int k = 0; k < n_motions; k++)
+		for (int s = 0; s < n_steps_move; s++)
+			times[n_times++] = motions[k].t0 + (motions[k].t1 - motions[k].t0) * s / (n_steps_move - 1);
+
+	if (n_motions == 0)
+	{
+		free(times);
+		free(well_starts);
+		free(motions);
+		return NULL;
+	}
+
+	for (int k = 0; k < trace->n_steps; k++)
+		if (trace->steps[k].type != STEP_MOVE)
+		{
+			times[n_times++] = trace->steps[k].start;
+			times[n_times++] = trace->steps[k].end;
+		}
 
 	if (n_times == 0)
 	{
 		free(times);
+		free(well_starts);
+		free(motions);
 		return NULL;
 	}
 
@@ -728,23 +995,15 @@ struct TransportWaveform* schedule_trace_to_waveform
 
 	struct TransportWaveform *waveform = allocate_transport_waveform(n_steps, trap->n_electrodes, n_ions);
 
-	// Moves of each ion in order
-	int *ion_move_starts = calloc(n_ions + 1, sizeof(int));
-	for (int m = 0; m < trace->n_moves; m++)
-		ion_move_starts[trace->moves[m].ion]++;
-	for (int i = 1; i <= n_ions; i++)
-		ion_move_starts[i] += ion_move_starts[i - 1];
-
-	int *ion_moves = malloc(MAX(trace->n_moves, 1) * sizeof(int));
-	int *ion_next = malloc(n_ions * sizeof(int));
-	memcpy(ion_next, ion_move_starts, n_ions * sizeof(int));
-	for (int m = 0; m < trace->n_moves; m++)
-		ion_moves[ion_next[trace->moves[m].ion - 1]++] = m;
-	memcpy(ion_next, ion_move_starts, n_ions * sizeof(int));
-
+	// Where each well is and where it points after the motions done so far, and its next motion
 	double (*positions)[3] = malloc(n_ions * sizeof(double[3]));
+	double *angles = calloc(n_ions, sizeof(double));
+	int *next = malloc(n_ions * sizeof(int));
 	for (int i = 0; i < n_ions; i++)
+	{
 		memcpy(positions[i], transport_program->initial_positions[i], sizeof(double[3]));
+		next[i] = well_starts[i];
+	}
 
 	for (int s = 0; s < n_steps; s++)
 	{
@@ -753,45 +1012,48 @@ struct TransportWaveform* schedule_trace_to_waveform
 
 		for (int i = 0; i < n_ions; i++)
 		{
-			// Finish the moves of the ion which are done by now
-			while (ion_next[i] < ion_move_starts[i + 1] && trace->moves[ion_moves[ion_next[i]]].arrive <= t)
+			// Finish the motions of the well which are done by now
+			while (next[i] < well_starts[i + 1] && motions[next[i]].t1 <= t)
 			{
-				memcpy(positions[i], trap_graph->zone_nodes[trace->moves[ion_moves[ion_next[i]]].to_zone].position, sizeof(double[3]));
-				ion_next[i]++;
+				memcpy(positions[i], motions[next[i]].end, sizeof(double[3]));
+				angles[i] += motions[next[i]].turn;
+				next[i]++;
 			}
 
 			double *well = waveform->well_positions[s * n_ions + i];
 			memcpy(well, positions[i], sizeof(double[3]));
+			waveform->well_angles[s * n_ions + i] = angles[i];
 
-			if (ion_next[i] == ion_move_starts[i + 1])
+			if (next[i] == well_starts[i + 1])
 				continue;
 
-			struct IonMove *move = &trace->moves[ion_moves[ion_next[i]]];
-			if (move->depart < t)
+			struct WellMotion *motion = &motions[next[i]];
+			if (motion->t0 < t)
 			{
-				double fraction = transport_profile((t - move->depart) / (move->arrive - move->depart));
-				double *start = trap_graph->zone_nodes[move->from_zone].position;
-				double *end = trap_graph->zone_nodes[move->to_zone].position;
+				double fraction = transport_profile((t - motion->t0) / (motion->t1 - motion->t0));
 
 				for (int k = 0; k < 3; k++)
-					well[k] = start[k] + fraction * (end[k] - start[k]);
+					well[k] = motion->start[k] + fraction * (motion->end[k] - motion->start[k]);
+				waveform->well_angles[s * n_ions + i] = angles[i] + fraction * motion->turn;
 			}
 		}
 	}
 
+	free(next);
+	free(angles);
 	free(positions);
-	free(ion_next);
-	free(ion_moves);
-	free(ion_move_starts);
+	free(well_starts);
+	free(motions);
 	free(times);
 
 	if (
-		solve_waveform(
+		solve_rotated_waveform(
 			trap,
 			ion_mass(ion), ion_charge(ion),
 			n_steps,
 			n_ions,
 			waveform->well_positions,
+			waveform->well_angles,
 			omega_axial,
 			WAVEFORM_ROUGHNESS_WEIGHT,
 			waveform->voltages
@@ -806,7 +1068,7 @@ struct TransportWaveform* schedule_trace_to_waveform
 }
 
 // Compute the largest residual force on an ion at any well of a waveform (N), and the largest relative error of the
-// axial secular frequency from its target
+// axial secular frequency (along the axial direction of each well) from its target
 void evaluate_waveform_errors
 (
 	struct Trap *trap,
@@ -842,7 +1104,12 @@ void evaluate_waveform_errors
 			double force = sqrt(grad_U[0]*grad_U[0] + grad_U[1]*grad_U[1] + grad_U[2]*grad_U[2]) / LENGTH_SCALE;
 			*max_force = MAX(*max_force, force);
 
-			double k_axial = H_U[0][0] / (LENGTH_SCALE * LENGTH_SCALE);
+			double axial[3];
+			double across[3];
+			double vertical[3];
+			well_axes(well_angle(waveform, s, w), axial, across, vertical);
+
+			double k_axial = directional_curvature(H_U, axial, axial) / (LENGTH_SCALE * LENGTH_SCALE);
 			double omega = (k_axial > 0) ? sqrt(k_axial / m) : 0.0;
 			*max_frequency_error = MAX(*max_frequency_error, fabs(omega - omega_axial) / omega_axial);
 		}
@@ -948,6 +1215,21 @@ void interpolate_waveform
 					dx
 				);
 			}
+
+		if (waveform_coarse->well_angles != NULL && waveform_fine->well_angles != NULL)
+			for (int w = 0; w < n_wells; w++)
+			{
+				for (int c = 0; c < n_coarse; c++)
+					(*column)[c] = waveform_coarse->well_angles[c * waveform_coarse->n_wells + w];
+
+				interpolate_1d(
+					n_coarse,
+					column,
+					s,
+					&waveform_fine->well_angles[s * waveform_fine->n_wells + w],
+					dx
+				);
+			}
 	}
 
 	free(column);
@@ -988,8 +1270,12 @@ struct TransportWaveform* compose_waveforms
 				composite_waveform->voltages[step * n_e + e] = scale * waveforms[w].voltages[substep * n_e + e];
 
 			for (int i = 0; i < MIN(n_wells, waveforms[w].n_wells); i++)
+			{
 				for (int k = 0; k < 3; k++)
 					composite_waveform->well_positions[step * n_wells + i][k] = waveforms[w].well_positions[substep * waveforms[w].n_wells + i][k];
+
+				composite_waveform->well_angles[step * n_wells + i] = well_angle(&waveforms[w], substep, i);
+			}
 		}
 	}
 

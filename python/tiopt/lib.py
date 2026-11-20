@@ -334,6 +334,7 @@ class TransportWaveformStruct(C.Structure):
         ("times", _double_p),
         ("n_wells", C.c_int),
         ("well_positions", _vec3_p),
+        ("well_angles", _double_p),
     ]
 
 
@@ -569,6 +570,7 @@ _prototype("ion_charge", _c, _ion_p)
 _prototype("allocate_transport_waveform", _waveform_p, C.c_int, C.c_int, C.c_int)
 _prototype("free_transport_waveform", None, _waveform_p)
 _prototype("solve_waveform", C.c_int, _trap_p, _c, _c, C.c_int, C.c_int, _double_p, _c, _c, _double_p)
+_prototype("solve_rotated_waveform", C.c_int, _trap_p, _c, _c, C.c_int, C.c_int, _double_p, _double_p, _c, _c, _double_p)
 _prototype("optimize_primitive", C.c_int, _trap_p, _ion_p, _waveform_p, _c, _c, _c, C.c_int)
 _prototype("generate_transport_waveform", _waveform_p, _trap_p, _ion_p, _double_p, _double_p, _c, C.c_int, _c)
 _prototype("generate_transport_primitive", _waveform_p, _trap_p, _ion_p, _double_p, _double_p, _c, C.c_int, _c, _c)
@@ -1655,15 +1657,18 @@ class Waveform:
 
     @classmethod
     def from_program(cls, trap, ion, program, n_steps_per_move=101, omega_axial=AXIAL_FREQUENCY):
-        """Solve for wells for every ion which follow every move of a TransportProgram, including the moves back into
-        storage between operations, at the times the program gives them, so that moves which overlap in time happen at
-        once.
+        """Solve for wells for every ion which follow every step of a TransportProgram (see TransportProgram.steps),
+        including the moves back into storage between operations, at the times the program gives them, so that moves
+        which overlap in time happen at once. Each well moves only while its ion moves along a segment and holds still
+        through splits, merges, junction crossings, SWAP gates, operations, and waits, and a physical swap of the two
+        ions of a chain turns their well by pi in the x-y plane (see well_angles), which swaps them.
 
         Args:
             trap: Trap whose electrodynamics have been solved.
             ion: Ion species.
             program: TransportProgram.
-            n_steps_per_move: Steps of the waveform over each move (moves which share times share steps).
+            n_steps_per_move: Steps of the waveform over each move along a segment and each turn of a well (motions
+                which share times share steps).
             omega_axial: Axial secular frequency of every well (rad/s).
 
         Returns:
@@ -1680,7 +1685,8 @@ class Waveform:
         return cls(pointer)
 
     @classmethod
-    def from_wells(cls, trap, ion, times, well_positions, omega_axial=AXIAL_FREQUENCY, roughness_weight=None):
+    def from_wells(cls, trap, ion, times, well_positions, omega_axial=AXIAL_FREQUENCY, roughness_weight=None,
+                   well_angles=None):
         """Solve for the voltages which hold wells at given positions at given times, e.g. to move several ions at once.
 
         Args:
@@ -1691,6 +1697,9 @@ class Waveform:
             omega_axial: Axial secular frequency of every well (rad/s).
             roughness_weight: Weight on the roughness of the voltages between steps (WAVEFORM_ROUGHNESS_WEIGHT by
                 default).
+            well_angles: Angle of the axial direction of every well from the trap axis in the x-y plane at every step
+                (rad) with shape (n_steps, n_wells), e.g. turning by pi to swap the two ions of a well, or None for
+                every well along the trap axis.
 
         Returns:
             New waveform
@@ -1705,8 +1714,12 @@ class Waveform:
         struct = waveform.struct
         C.memmove(struct.times, _ptr(times), times.nbytes)
         C.memmove(C.cast(struct.well_positions, _double_p), _ptr(_array(wells.reshape(-1))), wells.nbytes)
+        if well_angles is not None:
+            angles = _array(np.broadcast_to(np.asarray(well_angles, dtype=float), (n_steps, n_wells)).reshape(-1))
+            C.memmove(struct.well_angles, _ptr(angles), angles.nbytes)
         voltages = np.zeros(n_steps * trap.n_electrodes)
-        status = _lib.solve_waveform(C.byref(trap.struct), ion.mass, ion.charge, n_steps, n_wells, C.cast(struct.well_positions, _double_p), omega_axial, roughness_weight, _ptr(voltages))
+        status = _lib.solve_rotated_waveform(C.byref(trap.struct), ion.mass, ion.charge, n_steps, n_wells, C.cast(struct.well_positions, _double_p),
+                                             struct.well_angles, omega_axial, roughness_weight, _ptr(voltages))
         flush_c_output()
         if status != 0:
             waveform.close()
@@ -1785,6 +1798,15 @@ class Waveform:
         n = self.n_steps * self.n_wells * 3
         flat = _from_pointer(C.cast(self.struct.well_positions, _double_p), n)
         return flat.reshape(self.n_steps, self.n_wells, 3)
+
+    @property
+    def well_angles(self):
+        """Angles of the axial directions of the wells from the trap axis in the x-y plane (rad) with shape (n_steps,
+        n_wells), which are 0 for wells along the trap axis.
+        """
+        if not self.struct.well_angles:
+            return np.zeros((self.n_steps, self.n_wells))
+        return _from_pointer(self.struct.well_angles, self.n_steps * self.n_wells).reshape(self.n_steps, self.n_wells)
 
     @property
     def duration(self):

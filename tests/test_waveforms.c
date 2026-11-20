@@ -29,6 +29,7 @@ int test_all_waveforms
 	result += test_optimize_primitive(atol);
 	result += test_transport_program_to_waveform(atol);
 	result += test_schedule_trace_to_waveform(atol);
+	result += test_schedule_steps_to_waveform(atol);
 	result += test_compute_secular_frequencies(atol);
 	result += test_compute_U_pond(atol);
 
@@ -252,7 +253,7 @@ int test_optimize_primitive
 	double targets[N_WELL_CONSTRAINTS];
 	for (int s = 0; s < n_steps; s++)
 	{
-		build_well_constraints(&trap, m, q, waveform->well_positions[s], AXIAL_FREQUENCY, rows, targets);
+		build_well_constraints(&trap, m, q, waveform->well_positions[s], AXIAL_FREQUENCY, 0.0, rows, targets);
 
 		for (int r = 0; r < N_WELL_CONSTRAINTS; r++)
 		{
@@ -413,6 +414,137 @@ int test_schedule_trace_to_waveform
 	// Two wells 100 µm apart in this seven-electrode trap only reach the target frequency to about 6E-3, with these moves
 	// one after another (as transport_program_to_waveform finds too) or overlapping
 	result += check_error("schedule_trace_to_waveform wells have target frequency", max_frequency_error, 1E-2);
+
+	free_transport_waveform(waveform);
+	free_trap(&trap);
+
+	return result;
+}
+
+int test_schedule_steps_to_waveform
+(
+	double atol
+)
+{
+	struct Trap trap;
+	struct IonParameters ion;
+	make_test_trap(&trap, &ion);
+
+	double m = ion_mass(&ion);
+	double q = ion_charge(&ion);
+
+	// Three zones along the axis, with ions 1 and 2 in a chain in the first and ion 3 in the last
+	struct ZoneNode zones[3] = { { 0 } };
+	double xs[3] = { -100.0, 0.0, 100.0 };
+	for (int z = 0; z < 3; z++)
+	{
+		zones[z].position[0] = xs[z];
+		zones[z].position[2] = ION_HEIGHT;
+		find_rf_null(&trap, &zones[z].position, 100);
+	}
+
+	struct TrapGraph trap_graph = { 3, 0, zones, NULL };
+
+	double initial_positions[3][3];
+	memcpy(initial_positions[0], zones[0].position, sizeof(double[3]));
+	memcpy(initial_positions[1], zones[0].position, sizeof(double[3]));
+	memcpy(initial_positions[2], zones[2].position, sizeof(double[3]));
+
+	struct TransportProgram transport_program = { 0 };
+	transport_program.n_ions = 3;
+	transport_program.initial_positions = initial_positions;
+
+	// Ion 2 swaps places with ion 1 (turning their well), splits off, and moves to the middle zone; ion 3 then moves
+	// there, merges into its chain, and trades places with ion 2 by a SWAP gate before a gate on both
+	struct IonMove moves[2] = {
+		{ 2, 0, 1, 0, 0.0, 287E-6 },
+		{ 3, 2, 1, 0, 290E-6, 675E-6 },
+	};
+	struct TransportStep steps[7] = {
+		{ STEP_ION_SWAP, 2, 1, 0, 0, 0, 0.0, 202E-6 },
+		{ STEP_SPLIT, 2, 0, 0, 1, 0, 202E-6, 282E-6 },
+		{ STEP_MOVE, 2, 0, 0, 1, 0, 282E-6, 287E-6 },
+		{ STEP_MOVE, 3, 0, 2, 1, 1, 290E-6, 295E-6 },
+		{ STEP_MERGE, 3, 0, 1, 2, 1, 295E-6, 375E-6 },
+		{ STEP_GATE_SWAP, 3, 2, 1, 1, 1, 375E-6, 675E-6 },
+		{ STEP_OPERATION, 0, 0, 1, 1, 0, 675E-6, 775E-6 },
+	};
+
+	struct ScheduleTrace trace = { 0 };
+	trace.n_moves = 2;
+	trace.max_moves = 2;
+	trace.moves = moves;
+	trace.n_steps = 7;
+	trace.max_steps = 7;
+	trace.steps = steps;
+
+	struct TransportWaveform *waveform = schedule_trace_to_waveform(&trap, &ion, &trap_graph, &transport_program, &trace, 31, AXIAL_FREQUENCY);
+	if (waveform == NULL)
+	{
+		free_trap(&trap);
+		return check_error("schedule_trace_to_waveform follows the steps", HUGE_VAL, 0);
+	}
+
+	// 31 steps over the turn and over each move along a segment, and the ends of the merge, the SWAP gate and the
+	// operation, which hold the wells still
+	double error = abs(waveform->n_waveform_steps - 96) + abs(waveform->n_wells - 3);
+	error += fabs(waveform->times[waveform->n_waveform_steps - 1] - 775E-6) * 1E6;
+
+	int mid_turn = -1;
+	for (int s = 0; s < waveform->n_waveform_steps; s++)
+	{
+		double t = waveform->times[s];
+		double (*wells)[3] = &waveform->well_positions[3 * s];
+		double *angles = &waveform->well_angles[3 * s];
+
+		if (s > 0 && t <= waveform->times[s - 1])
+			error += 1.0;
+
+		// Ion 1 stays in its zone, and the others are where their steps put them, holding still through the split, the
+		// merge and the SWAP gate
+		error += fabs(wells[0][0] - xs[0]);
+		if (t <= 282E-6 + 1E-12)
+			error += fabs(wells[1][0] - xs[0]);
+		if (t >= 287E-6 - 1E-12)
+			error += fabs(wells[1][0] - xs[1]);
+		if (t <= 290E-6 + 1E-12)
+			error += fabs(wells[2][0] - xs[2]);
+		if (t >= 295E-6 - 1E-12)
+			error += fabs(wells[2][0] - xs[1]);
+
+		// The well of ions 1 and 2 turns by pi along a minimum-jerk profile over the swap, and the others do not turn
+		double u = MIN(t / 202E-6, 1.0);
+		double turn = PI * u*u*u * (10 - 15*u + 6*u*u);
+		error += fabs(angles[0] - turn) + fabs(angles[1] - turn) + fabs(angles[2]);
+
+		if (fabs(t - 101E-6) < 1E-12)
+			mid_turn = s;
+	}
+
+	int result = check_error("schedule_trace_to_waveform follows the steps", error + (mid_turn < 0), atol);
+
+	// Through the turn, the weakest mode of the well points along its axial direction (across the trap axis halfway), at
+	// the target frequency
+	double max_axis_error = (mid_turn < 0);
+	double max_frequency_error = 0.0;
+	for (int s = 0; s < waveform->n_waveform_steps && waveform->times[s] <= 202E-6 + 1E-12; s++)
+	{
+		double omega[3];
+		double axes[3][3];
+		compute_normal_modes(&trap, m, q, &waveform->voltages[s * waveform->n_electrodes], zones[0].position, &omega, &axes);
+
+		int weakest = 0;
+		for (int k = 1; k < 3; k++)
+			if (omega[k] < omega[weakest])
+				weakest = k;
+
+		double angle = waveform->well_angles[3 * s];
+		max_axis_error = MAX(max_axis_error, 1 - fabs(axes[weakest][0] * cos(angle) + axes[weakest][1] * sin(angle)));
+		max_frequency_error = MAX(max_frequency_error, fabs(omega[weakest] - AXIAL_FREQUENCY) / AXIAL_FREQUENCY);
+	}
+
+	result += check_error("schedule_trace_to_waveform turns the well of a swap", max_axis_error, 1E-3);
+	result += check_error("schedule_trace_to_waveform turned well has target frequency", max_frequency_error, 1E-2);
 
 	free_transport_waveform(waveform);
 	free_trap(&trap);

@@ -239,6 +239,7 @@ struct TransportWaveform
 	double *times; // time at which each step of the waveform is applied (s); implicitly, length n_waveform_steps
 	int n_wells;
 	double (*well_positions)[3]; // target position of each potential well at each timestep; implicitly, length n_waveform_steps-by-n_wells-by-3
+	double *well_angles; // angle of the axial direction of each potential well from the trap axis (x) in the x-y plane at each timestep (rad), e.g. while a well turns to swap two ions, or NULL for every well along the trap axis; implicitly, length n_waveform_steps-by-n_wells
 };
 
 // Quantum dynamics data
