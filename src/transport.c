@@ -156,8 +156,8 @@ static int schedule_baseline
     return 0;
 }
 
-// Assign each operation of a layer to a zone of its type, so that the longest distance any target ion moves is as short
-// as possible (and then the total distance), with branch and bound over the zones of the operations in order of their
+// Assign each operation of a layer to a zone of its type, so that the longest distance any target ion moves along the
+// segments of the trap graph is as short as possible (and then the total distance), with branch and bound over the zones of the operations in order of their
 // shortest possible transport, longest first; ions which no operation of the layer targets stay where they are. Returns
 // 1 if no assignment fits in the zones
 #define LAYER_ASSIGN_MAX_NODES 20000
@@ -170,7 +170,7 @@ struct LayerAssignment
     int *n_targets; // implicitly, length n_ops
     int *n_candidates; // implicitly, length n_ops
     int **candidates; // zones each operation can use, nearest first; implicitly, length n_ops-by-[n_candidates]
-    double **costs; // longest distance moved by a target ion for each candidate; implicitly, like candidates
+    double **costs; // longest distance moved by a target ion for each candidate (along the segments); implicitly, like candidates
     double **sums; // total distance moved by the target ions for each candidate; implicitly, like candidates
     int *free_capacity; // room left in each zone; implicitly, length n_zones
     int *choice; // implicitly, length n_ops
@@ -277,11 +277,14 @@ static int assign_layer_zones
             double cost = 0.0;
             double sum = 0.0;
             for (int t = 0; t < instr->n_target_ions; t++) {
-                double *position = ion_states[instr->target_ions[t] - 1]->position;
-                double distance = sqrt(pow(zones[z].position[0] - position[0], 2) + pow(zones[z].position[1] - position[1], 2) + pow(zones[z].position[2] - position[2], 2));
+                double distance = trap_graph_distance(trapGraph, (int) (ion_states[instr->target_ions[t] - 1] - zones), z);
 
                 cost = MAX(cost, distance);
                 sum += distance;
+            }
+
+            if (cost == HUGE_VAL) {
+                continue;
             }
 
             // Insert in order of cost, then total distance
@@ -362,6 +365,99 @@ static int assign_layer_zones
     free(a.best_choice);
 
     return status;
+}
+
+// Transport the ions of the operations of a round into the zones assigned to them together, in an order in which every
+// zone has room for the ions coming into it when they arrive (the assignment counts on the ions of the round leaving
+// their zones, so an operation waits for the ions in its zone to leave first). When full zones would exchange ions, so
+// that no order works, an ion which another operation takes elsewhere moves into storage first. Sets the round of each
+// operation
+static void transport_round_in_order
+(
+    struct TrapGraph *trapGraph,
+    struct CircuitGraph *circuitGraph,
+    struct ZoneNode **ion_states,
+    int *round_ops,
+    struct ZoneNode **op_zones,
+    int n_round,
+    int round,
+    int *rounds,
+    struct TransportProgram *transportProgram,
+    struct ScheduleTrace *trace
+)
+{
+    int n_ions = transportProgram->n_ions;
+    int *moved = calloc(MAX(n_round, 1), sizeof(int));
+    int *keep = malloc(MAX(n_ions, 1) * sizeof(int));
+
+    for (int n_moved = 0; n_moved < n_round; n_moved++) {
+        int pick = -1;
+
+        for (int attempt = 0; attempt < 2 && pick < 0; attempt++) {
+            for (int k = 0; k < n_round && pick < 0; k++) {
+                if (moved[k]) {
+                    continue;
+                }
+
+                struct InstructionNode *instr = &circuitGraph->instruction_nodes[round_ops[k]];
+                int n_present = 0;
+                for (int t = 0; t < instr->n_target_ions; t++) {
+                    n_present += (ion_states[instr->target_ions[t] - 1] == op_zones[k]);
+                }
+
+                if (op_zones[k]->zone_occupancy - n_present + instr->n_target_ions <= op_zones[k]->zone_capacity) {
+                    pick = k;
+                }
+            }
+
+            if (pick >= 0 || attempt == 1) {
+                break;
+            }
+
+            // Full zones exchange ions: move an ion which waits in the zone of the first operation left, but which
+            // another operation takes elsewhere, into storage
+            int first = 0;
+            while (moved[first]) {
+                first++;
+            }
+
+            int blocking = -1;
+            for (int k = 0; k < n_round && blocking < 0; k++) {
+                if (moved[k] || k == first || op_zones[k] == op_zones[first]) {
+                    continue;
+                }
+
+                struct InstructionNode *instr = &circuitGraph->instruction_nodes[round_ops[k]];
+                for (int t = 0; t < instr->n_target_ions && blocking < 0; t++) {
+                    if (ion_states[instr->target_ions[t] - 1] == op_zones[first]) {
+                        blocking = instr->target_ions[t] - 1;
+                    }
+                }
+            }
+
+            if (blocking >= 0) {
+                for (int i = 0; i < n_ions; i++) {
+                    keep[i] = (i != blocking);
+                }
+                release_ions(trapGraph, ion_states, n_ions, keep, trace);
+            }
+        }
+
+        // No order works and nothing could be moved out of the way: go on in order, as before
+        if (pick < 0) {
+            pick = 0;
+            while (moved[pick]) {
+                pick++;
+            }
+        }
+
+        moved[pick] = 1;
+        rounds[round_ops[pick]] = round;
+        transport_ions(trapGraph, ion_states, &circuitGraph->instruction_nodes[round_ops[pick]], round_ops[pick], op_zones[pick], transportProgram, trace);
+    }
+
+    free(keep);
+    free(moved);
 }
 
 // Scheduler which visits the instructions of each layer through the circuit sorted by layer; with SCHEDULE_FAST it gives
@@ -557,10 +653,7 @@ static int schedule_sorted
                         }
                     }
 
-                    for (int k = 0; k < n_round; k++) {
-                        rounds[round_ops[k]] = n_rounds;
-                        transport_ions(trapGraph, ion_states, &circuitGraph->instruction_nodes[round_ops[k]], round_ops[k], op_zones[k], transportProgram, trace);
-                    }
+                    transport_round_in_order(trapGraph, circuitGraph, ion_states, round_ops, op_zones, n_round, n_rounds, rounds, transportProgram, trace);
                 } else {
                     // Nearest zone for each operation in turn, leaving the operations which do not fit for the next round
                     int released = 0;
@@ -725,7 +818,7 @@ struct TransportProgram* generate_transport_schedule_strategy
     struct ScheduleTrace *trace
 )
 {
-    struct ScheduleOptions options = { strategy, DEFAULT_LOOKAHEAD_LAYERS, 0 };
+    struct ScheduleOptions options = { strategy, DEFAULT_LOOKAHEAD_LAYERS, 0, NULL };
 
     return generate_transport_schedule_options(trapGraph, circuitGraph, transportProgram, &options, trace);
 }
@@ -783,6 +876,13 @@ static struct TransportProgram* schedule_with_options
         memcpy(transportProgram->initial_positions[i], ion_states[i]->position, sizeof(double[3]));
     }
 
+    free(trace->initial_zones);
+    trace->n_ions = transportProgram->n_ions;
+    trace->initial_zones = malloc(transportProgram->n_ions * sizeof(int));
+    for (int i = 0; i < transportProgram->n_ions; i++) {
+        trace->initial_zones[i] = (int) (ion_states[i] - trapGraph->zone_nodes);
+    }
+
     // Find how many layers in circuit (may be redundant)
     int max_layer = 0;
     for (int i = 0; i < circuitGraph->n_instruction_nodes; i++) {
@@ -832,12 +932,13 @@ static struct TransportProgram* schedule_with_options
     trace->n_rounds = n_rounds;
     trace->transport_rounds = rounds;
 
-    // Time every move, including the moves back into storage, and the arrival of every transport
-    time_schedule_trace(trapGraph, circuitGraph, transportProgram, trace);
+    // Time every move along the segments of the trap graph, including the moves back into storage, and the arrival of
+    // every transport
+    int timing_status = time_schedule_trace(trapGraph, circuitGraph, transportProgram, trace, options->cost_model);
 
     free_schedule_trace(&local_trace);
 
-    return transportProgram;
+    return (timing_status == 0) ? transportProgram : NULL;
 }
 
 // Generates transport schedule given circuit data and trap data with the given options, recording every move of the ions
@@ -879,12 +980,23 @@ void free_schedule_trace(struct ScheduleTrace *trace)
 {
     free(trace->moves);
     free(trace->transport_rounds);
+    free(trace->initial_zones);
+    free(trace->steps);
+    free(trace->operation_n_bars);
 
     trace->moves = NULL;
     trace->transport_rounds = NULL;
+    trace->initial_zones = NULL;
+    trace->steps = NULL;
+    trace->operation_n_bars = NULL;
+    trace->fidelity = 0.0;
+    trace->max_n_bar = 0.0;
     trace->n_rounds = 0;
     trace->n_moves = 0;
     trace->max_moves = 0;
+    trace->n_ions = 0;
+    trace->n_steps = 0;
+    trace->max_steps = 0;
 }
 
 // Helper to get operation type from QASM code, ignoring the parameters of the gate (e.g. "rz(0.5)"), which do not
@@ -912,6 +1024,37 @@ enum OperationType get_operation_type(const char *op)
 int is_diagonal_gate(const char *op)
 {
     static const char *gates[] = { "z", "s", "sdg", "t", "tdg", "rz", "p", "cz", "cp", "crz", "rzz" };
+
+    size_t length = strcspn(op, "(");
+
+    for (size_t g = 0; g < sizeof(gates) / sizeof(gates[0]); g++) {
+        if (strlen(gates[g]) == length && strncmp(op, gates[g], length) == 0) return 1;
+    }
+
+    return 0;
+}
+
+// Number of Mølmer-Sørensen gates which a gate from QASM code on several qubits takes (ignoring its parameters), as in
+// tiopt.circuits.MS_PER_GATE
+int gate_ms_count(const char *op)
+{
+    static const char *gates[] = { "swap", "iswap", "cu3", "crx", "cry", "crz", "cp", "ch" };
+    static const int counts[] = { 3, 2, 2, 2, 2, 2, 2, 1 };
+
+    size_t length = strcspn(op, "(");
+
+    for (size_t g = 0; g < sizeof(gates) / sizeof(gates[0]); g++) {
+        if (strlen(gates[g]) == length && strncmp(op, gates[g], length) == 0) return counts[g];
+    }
+
+    return 1;
+}
+
+// Whether a gate from QASM code is a rotation about Z (ignoring its parameters), which is done by shifting the phase of
+// later pulses and so takes no time, as in tiopt.circuits.VIRTUAL_GATES
+int is_virtual_gate(const char *op)
+{
+    static const char *gates[] = { "id", "z", "s", "sdg", "t", "tdg", "rz", "p", "u1" };
 
     size_t length = strcspn(op, "(");
 
@@ -1079,6 +1222,8 @@ struct CircuitGraph* parse_qasm(const char *filename)
         // A gate which is not known would otherwise be left out of the schedule
         enum OperationType op_type = get_operation_type(token);
         int diagonal = is_diagonal_gate(token);
+        int n_ms_gates = gate_ms_count(token);
+        int virtual_gate = is_virtual_gate(token);
         if (op_type == 0) {
             printf("ERROR: Circuit contains unknown gate '%s' on line %d\n", token, line_number);
 
@@ -1105,6 +1250,8 @@ struct CircuitGraph* parse_qasm(const char *filename)
 
         node.operation_type = op_type;
         node.diagonal = diagonal;
+        node.n_ms_gates = n_ms_gates;
+        node.virtual_gate = virtual_gate;
         node.operation_duration = 0.0;
         node.graphindex = count + 1;
         node.n_target_ions = n_targets;

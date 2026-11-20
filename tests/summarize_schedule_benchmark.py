@@ -30,9 +30,11 @@ def load(filename):
     cases = defaultdict(dict)
     with open(filename) as f:
         for row in csv.DictReader(f):
-            row["valid"] = row["scheduled"] == "1" and row["invalid"] == "0"
+            row["valid"] = row["scheduled"] == "1" and row["invalid"] == "0" and row.get("violations", "0") == "0"
             for key in ("makespan_us", "distance_um", "run_time_us"):
                 row[key] = float(row[key])
+            # Infidelity of the program in the cost model of the scheduler, where lower is better (as for makespan)
+            row["infidelity"] = 1.0 - float(row["fidelity"]) if "fidelity" in row else 0.0
             cases[(row["circuit"], row["layout"])][row["strategy"]] = row
     return cases
 
@@ -68,7 +70,7 @@ def main():
     ]
     header = [f"{new} vs {old}" for new, old in comparisons]
 
-    for metric, title in [("makespan_us", "Makespan"), ("distance_um", "Transport distance")]:
+    for metric, title in [("makespan_us", "Makespan"), ("infidelity", "Infidelity"), ("distance_um", "Transport distance")]:
         print(f"\n{title} reduction, median [min, max] over every circuit and layout (negative is worse)")
         print(f"{'family':12s}  " + "  ".join(f"{h:>27s}" for h in header) + f"  {'cases better/same/worse':>24s}")
         for name in families + ["all"]:

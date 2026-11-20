@@ -89,6 +89,7 @@ class TransportEdge(C.Structure):
         ("edge_type", C.c_int),
         ("n_zones", C.c_int),
         ("zone_nodes", C.POINTER(ZoneNode)),
+        ("length", C.c_double),
     ]
 
 
@@ -99,6 +100,9 @@ class TrapGraphStruct(C.Structure):
         ("n_transport_edges", C.c_int),
         ("zone_nodes", C.POINTER(ZoneNode)),
         ("transport_edges", C.POINTER(TransportEdge)),
+        ("route_lengths", _double_p),
+        ("route_next", _int_p),
+        ("segment_lengths", _double_p),
     ]
 
 
@@ -192,6 +196,8 @@ InstructionNode._fields_ = [
     ("n_prev_nodes", C.c_int),
     ("prev_nodes", C.POINTER(InstructionNode)),
     ("diagonal", C.c_int),
+    ("n_ms_gates", C.c_int),
+    ("virtual_gate", C.c_int),
 ]
 
 
@@ -230,6 +236,20 @@ class IonMoveStruct(C.Structure):
     ]
 
 
+class TransportStepStruct(C.Structure):
+    """Mirror of struct TransportStep in transport.h."""
+    _fields_ = [
+        ("type", C.c_int),
+        ("ion", C.c_int),
+        ("other_ion", C.c_int),
+        ("zone", C.c_int),
+        ("to_zone", C.c_int),
+        ("index", C.c_int),
+        ("start", C.c_double),
+        ("end", C.c_double),
+    ]
+
+
 class ScheduleTraceStruct(C.Structure):
     """Mirror of struct ScheduleTrace in transport.h."""
     _fields_ = [
@@ -238,6 +258,43 @@ class ScheduleTraceStruct(C.Structure):
         ("moves", C.POINTER(IonMoveStruct)),
         ("n_rounds", C.c_int),
         ("transport_rounds", _int_p),
+        ("n_ions", C.c_int),
+        ("initial_zones", _int_p),
+        ("n_steps", C.c_int),
+        ("max_steps", C.c_int),
+        ("steps", C.POINTER(TransportStepStruct)),
+        ("fidelity", C.c_double),
+        ("max_n_bar", C.c_double),
+        ("operation_n_bars", _double_p),
+    ]
+
+
+class TransportCostModelStruct(C.Structure):
+    """Mirror of struct TransportCostModel in transport.h (times in s, speed in µm/s, heating in quanta)."""
+    _fields_ = [
+        ("speed", C.c_double),
+        ("min_move", C.c_double),
+        ("split", C.c_double),
+        ("merge", C.c_double),
+        ("junction_y", C.c_double),
+        ("junction_x", C.c_double),
+        ("rotation", C.c_double),
+        ("swap_gates", C.c_int),
+        ("gate_model", C.c_int),
+        ("two_qubit", C.c_double),
+        ("single_qubit", C.c_double),
+        ("measurement", C.c_double),
+        ("cooling", C.c_double),
+        ("split_heating", C.c_double),
+        ("merge_heating", C.c_double),
+        ("junction_heating", C.c_double),
+        ("move_heating", C.c_double),
+        ("background_heating", C.c_double),
+        ("gate_background_error", C.c_double),
+        ("motional_error", C.c_double),
+        ("single_qubit_error", C.c_double),
+        ("measurement_error", C.c_double),
+        ("cooled_n_bar", C.c_double),
     ]
 
 
@@ -247,6 +304,7 @@ class ScheduleOptionsStruct(C.Structure):
         ("strategy", C.c_int),
         ("lookahead_layers", C.c_int),
         ("commute", C.c_int),
+        ("cost_model", C.POINTER(TransportCostModelStruct)),
     ]
 
 
@@ -571,6 +629,14 @@ _prototype("parse_qasm", C.POINTER(CircuitGraphStruct), C.c_char_p)
 _prototype("generate_transport_schedule", C.POINTER(TransportProgramStruct), C.POINTER(TrapGraphStruct), C.POINTER(CircuitGraphStruct), C.POINTER(TransportProgramStruct))
 _prototype("generate_linear_trap_graph", None, C.c_int, _int_p, _int_p, _c, _c, _c, C.POINTER(TrapGraphStruct))
 _prototype("free_trap_graph", None, C.POINTER(TrapGraphStruct))
+_prototype("generate_trap_graph", None, C.c_int, _int_p, _int_p, _double_p, C.c_int, _int_p, _double_p, C.POINTER(TrapGraphStruct))
+_prototype("trap_graph_distance", C.c_double, C.POINTER(TrapGraphStruct), C.c_int, C.c_int)
+_prototype("trap_graph_route", C.c_int, C.POINTER(TrapGraphStruct), C.c_int, C.c_int, _int_p)
+_prototype("default_transport_cost_model", TransportCostModelStruct)
+_prototype("distance_transport_cost_model", TransportCostModelStruct)
+_prototype("two_qubit_gate_time", C.c_double, C.POINTER(TransportCostModelStruct), C.c_int, C.c_int)
+_prototype("check_schedule_trace", C.c_int, C.POINTER(TrapGraphStruct), C.POINTER(CircuitGraphStruct), C.POINTER(TransportProgramStruct),
+           C.POINTER(ScheduleTraceStruct), C.POINTER(TransportCostModelStruct), C.c_char_p, C.c_int)
 _prototype("free_circuit_graph", None, C.POINTER(CircuitGraphStruct))
 _prototype("free_transport_program", None, C.POINTER(TransportProgramStruct))
 _prototype("generate_transport_schedule_strategy", C.POINTER(TransportProgramStruct), C.POINTER(TrapGraphStruct), C.POINTER(CircuitGraphStruct), C.POINTER(TransportProgramStruct), C.c_int, C.POINTER(ScheduleTraceStruct))
@@ -2416,6 +2482,69 @@ class TrapGraph:
         return cls([t for t, _ in zones], [c for _, c in zones], -half_span, half_span, height)
 
     @classmethod
+    def from_segments(cls, zone_types, zone_capacities, positions, segments, lengths=None):
+        """Make zones at the given positions, joined by shuttling segments, along which ions move between them.
+
+        Args:
+            zone_types: Type of each zone, where a zone can have several types joined by "+" (e.g. "load+storage"), and
+                "junction" zones join three or more segments and hold no ions between moves.
+            zone_capacities: Number of ions which each zone can hold.
+            positions: Position of each zone (µm), as (x, y) or (x, y, z) (where z is ION_HEIGHT if it is left out).
+            segments: Pairs of zones (from 0) joined by a segment.
+            lengths: Length of each segment (µm), or None (or 0 for a segment) for the distance between its zones.
+        """
+        n = len(zone_types)
+        points = np.zeros((n, 3))
+        points[:, 2] = ION_HEIGHT
+        for z, position in enumerate(positions):
+            points[z, :len(position)] = position
+        segments = np.asarray(segments, dtype=np.intc).reshape(-1, 2)
+        if segments.size and (segments.min() < 0 or segments.max() >= n):
+            raise ValueError(f"segments must join zones from 0 to {n - 1}")
+        lengths = np.zeros(len(segments)) if lengths is None else np.asarray(lengths, dtype=float)
+        if len(lengths) != len(segments):
+            raise ValueError("give one length for each segment")
+        types = (C.c_int * n)(*[_zone_type(t) for t in zone_types])
+        capacities = (C.c_int * n)(*[int(c) for c in zone_capacities])
+        graph = cls.__new__(cls)
+        graph.struct = TrapGraphStruct()
+        _lib.generate_trap_graph(n, types, capacities, _ptr(np.ascontiguousarray(points)), len(segments),
+                                 np.ascontiguousarray(segments).ctypes.data_as(_int_p), _ptr(np.ascontiguousarray(lengths)), C.byref(graph.struct))
+        graph.zone_types = list(zone_types)
+        return graph
+
+    @classmethod
+    def from_architecture(cls, architecture, zone_types=None):
+        """Make the zones of a QCCD architecture (see tiopt.qccd.Architecture): a zone for each trap (holding up to its
+        capacity) and each junction, joined by its segments (of their lengths), at the positions of its nodes.
+
+        Args:
+            architecture: tiopt.qccd.Architecture.
+            zone_types: Type of each node's zone, or None for "gate+measure" for traps where gates can be done,
+                "load+storage" for the other traps, and "junction" for junctions.
+        """
+        nodes = architecture.nodes
+        if zone_types is None:
+            zone_types = ["junction" if node.kind == "junction" else "gate+measure" if node.gate_zone else "load+storage" for node in nodes]
+            if "load+storage" not in zone_types:
+                raise ValueError("every trap of the architecture is a gate trap, so there is nowhere to load and store ions; give zone_types")
+        segments = list(architecture.lengths)
+        return cls.from_segments(zone_types, [node.capacity for node in nodes], [node.position for node in nodes],
+                                 segments, [architecture.lengths[s] for s in segments])
+
+    def distance(self, from_zone, to_zone):
+        """Shortest distance along the segments between two zones (µm), or inf if there is no path."""
+        return float(_lib.trap_graph_distance(C.byref(self.struct), int(from_zone), int(to_zone)))
+
+    def route(self, from_zone, to_zone):
+        """Zones of the shortest path along the segments between two zones (from the first to the last), or [] if
+        there is no path.
+        """
+        path = (C.c_int * max(self.struct.n_zones, 1))()
+        n = _lib.trap_graph_route(C.byref(self.struct), int(from_zone), int(to_zone), path)
+        return list(path[:n])
+
+    @classmethod
     def from_trap(cls, trap):
         """Make the zones of a trap (see Trap.zones), with consecutive zones connected."""
         graph = cls.__new__(cls)
@@ -2453,6 +2582,63 @@ SCHEDULE_STRATEGIES = {"baseline": 0, "fast": 1, "rounds": 2, "lookahead": 3, "l
 DEFAULT_LOOKAHEAD_LAYERS = int(constant("DEFAULT_LOOKAHEAD_LAYERS"))
 
 
+# Types of the steps of a schedule (enum TransportStepType in transport.h)
+SCHEDULE_STEP_TYPES = ("split", "move", "junction", "merge", "ion swap", "operation", "gate swap")
+
+# Gate models of the transport cost model (enum TransportGateModel in transport.h), as in tiopt.gates.GATE_MODELS
+TRANSPORT_GATE_MODELS = {"fixed": 0, "AM1": 1, "AM2": 2, "PM": 3, "FM": 4}
+
+
+def transport_cost_model(timing=None, noise=None):
+    """Cost model of the transport scheduler (TransportCostModelStruct) with the durations of a tiopt.qccd.TimingModel
+    and the heating and errors of a tiopt.qccd.NoiseModel (their defaults if None), converted from µs to s. The default
+    cost model of the scheduler is this one with the defaults of both. Reordering with "gate" swaps uses SWAP gates in
+    zones where gates can be done, and swaps ions physically elsewhere.
+    """
+    from . import qccd
+
+    timing = qccd.TimingModel() if timing is None else timing
+    noise = qccd.NoiseModel() if noise is None else noise
+    if timing.gate_model not in TRANSPORT_GATE_MODELS:
+        raise ValueError(f"unknown gate model {timing.gate_model!r}; choose from AM1, AM2, PM, FM")
+    us = 1e-6
+    return TransportCostModelStruct(
+        speed=timing.speed / us, min_move=timing.min_move * us, split=timing.split * us, merge=timing.merge * us,
+        junction_y=timing.junction_y * us, junction_x=timing.junction_x * us, rotation=timing.rotation * us,
+        swap_gates=int(timing.swap_type == "gate"), gate_model=TRANSPORT_GATE_MODELS[timing.gate_model],
+        two_qubit=float(constant("GATE_DURATION")), single_qubit=timing.single_qubit * us,
+        measurement=timing.measurement * us, cooling=noise.cooling_time * us, split_heating=noise.split_heating,
+        merge_heating=noise.merge_heating, junction_heating=noise.junction_heating, move_heating=noise.move_heating,
+        background_heating=noise.background_heating / us, gate_background_error=noise.gate_background_error / us,
+        motional_error=noise.motional_error, single_qubit_error=noise.single_qubit_error,
+        measurement_error=noise.measurement_error, cooled_n_bar=noise.cooled_n_bar)
+
+
+def distance_cost_model():
+    """Cost model of the transport scheduler which only counts the distance ions move (see
+    distance_transport_cost_model in transport.h): moves at TRANSPORT_SPEED_LIMIT, other steps take no time, and
+    operations take GATE_DURATION, DETECTION_DURATION and COOLING_DURATION.
+    """
+    return _lib.distance_transport_cost_model()
+
+
+@dataclass
+class ScheduleStep:
+    """Step of a schedule (see TransportProgram.steps): its type (one of SCHEDULE_STEP_TYPES), the ion it moves (from 1,
+    or 0 for an operation), the neighbor an ion swaps with (or 0), the zone it happens in, the other end of a move (or
+    the neighbor which a split or merge faces), the move it is part of (an index of TransportProgram.moves, or for an
+    operation, its instruction), and its start and end (s).
+    """
+    type: str
+    ion: int
+    other_ion: int
+    zone: int
+    to_zone: int
+    index: int
+    start: float
+    end: float
+
+
 @dataclass
 class ScheduleMove:
     """Move of an ion (from 1) from one zone of a TrapGraph to another, for a transport of the program (or -1 for a move
@@ -2471,7 +2657,7 @@ class TransportProgram:
     ions (including the moves back into storage between operations) and when it happens.
     """
 
-    def __init__(self, trap_graph, circuit, strategy=None, lookahead_layers=None, commute=False):
+    def __init__(self, trap_graph, circuit, strategy=None, lookahead_layers=None, commute=False, cost_model=None):
         """Schedule the transports of a circuit on the zones of a TrapGraph.
 
         Args:
@@ -2483,6 +2669,9 @@ class TransportProgram:
                 DEFAULT_LOOKAHEAD_LAYERS if None).
             commute: Move operations which are diagonal in the computational basis (rz, rzz, cz, cp, ..., which commute
                 with each other) into fewer layers before scheduling; the layers of the circuit itself are unchanged.
+            cost_model: Durations, heating and errors of the steps and operations (see transport_cost_model, which
+                makes one from a tiopt.qccd.TimingModel and NoiseModel, and distance_cost_model), or None for the
+                defaults of tiopt.qccd.
         """
         if strategy is None:
             strategy_value = _lib.default_schedule_strategy()
@@ -2492,7 +2681,8 @@ class TransportProgram:
             raise ValueError(f"unknown strategy {strategy!r}; choose from {', '.join(SCHEDULE_STRATEGIES)}")
         self.lookahead_layers = max(int(DEFAULT_LOOKAHEAD_LAYERS if lookahead_layers is None else lookahead_layers), 1)
         self.commute = bool(commute)
-        options = ScheduleOptionsStruct(strategy_value, self.lookahead_layers, int(self.commute))
+        self.cost_model = _lib.default_transport_cost_model() if cost_model is None else cost_model
+        options = ScheduleOptionsStruct(strategy_value, self.lookahead_layers, int(self.commute), C.pointer(self.cost_model))
         self._pointer = None
         self._trace = ScheduleTraceStruct()
         memory = _libc.malloc(C.sizeof(TransportProgramStruct))
@@ -2504,8 +2694,9 @@ class TransportProgram:
             _lib.free_schedule_trace(C.byref(self._trace))
             raise TiOptError("failed to schedule transports (check zone types and capacities)")
         self._pointer = pointer
-        # The zones of the moves belong to the trap graph
+        # The zones of the moves belong to the trap graph, and the checker reads the circuit
         self.trap_graph = trap_graph
+        self._circuit = circuit
 
     def close(self):
         """Free the memory of the transport program."""
@@ -2556,6 +2747,62 @@ class TransportProgram:
         """Every move of the ions in order, including the moves back into storage between operations (ScheduleMove)."""
         return [ScheduleMove(m.ion, m.from_zone, m.to_zone, m.transport, m.depart, m.arrive)
                 for m in (self._trace.moves[k] for k in range(self._trace.n_moves))]
+
+    @property
+    def steps(self):
+        """Every step which carries out the moves along the segments of the trap graph, and every operation
+        (ScheduleStep), in the order they were planned (which is the order of time in each zone).
+        """
+        return [ScheduleStep(SCHEDULE_STEP_TYPES[st.type], st.ion, st.other_ion, st.zone, st.to_zone, st.index, st.start, st.end)
+                for st in (self._trace.steps[k] for k in range(self._trace.n_steps))]
+
+    def check(self):
+        """Check the schedule against the physical rules of shuttling, independently of the scheduler: ions move only
+        along the segments of the trap graph, one at a time on each, and never pass each other (only by merging into
+        a chain, swapping to its far end, and splitting off again); they split off, swap, and merge only at the ends of
+        chains; zones hold no more ions than their capacity between moves; every operation finds its ions in a zone of
+        its type; and no step is shorter than in the cost model of the program.
+
+        Returns:
+            Descriptions of the violations found (the first ten, and how many more there are), or [] if there are none.
+        """
+        buffer = C.create_string_buffer(4096)
+        n = _lib.check_schedule_trace(C.byref(self.trap_graph.struct), self._circuit._pointer, self._pointer,
+                                      C.byref(self._trace), C.byref(self.cost_model), buffer, len(buffer))
+        flush_c_output()
+        messages = [line for line in buffer.value.decode(errors="replace").splitlines() if line]
+        if n > len(messages):
+            messages.append(f"... and {n - len(messages)} more")
+        return messages
+
+    @property
+    def fidelity(self):
+        """Estimated fidelity of the program: the product of the fidelities of its operations and SWAP gates, where a
+        two-qubit gate has 1 - gate_background_error tau - A (2 n_bar + 1) with A = motional_error N / ln N for a chain
+        of N ions with mean phonon number n_bar (the model of tiopt.qccd).
+        """
+        return float(self._trace.fidelity)
+
+    @property
+    def max_n_bar(self):
+        """Largest mean phonon number of a chain at a two-qubit gate."""
+        return float(self._trace.max_n_bar)
+
+    @property
+    def operation_n_bars(self):
+        """Mean phonon number of the chain of each operation when it starts."""
+        return _from_pointer(self._trace.operation_n_bars, self.n_transports)
+
+    @property
+    def initial_zones(self):
+        """Zone of each ion before the first move, where the ions of a zone form a chain in the order of the ions."""
+        return [int(self._trace.initial_zones[i]) for i in range(self._trace.n_ions)]
+
+    @property
+    def duration(self):
+        """Time at which the last operation or move ends (s)."""
+        ends = [st.end for st in (self._trace.steps[k] for k in range(self._trace.n_steps))]
+        return max(ends, default=0.0)
 
     @property
     def n_rounds(self):

@@ -17,7 +17,9 @@ from .lib import (
     TRANSPORT_SPEED_LIMIT,
     SCHEDULE_STRATEGIES,
     DEFAULT_LOOKAHEAD_LAYERS,
+    SCHEDULE_STEP_TYPES,
     ScheduleMove,
+    ScheduleStep,
     Circuit,
     Grating,
     Instruction,
@@ -36,6 +38,7 @@ from .lib import (
     default_codesign_environment,
     default_codesign_parameters,
     detection_fidelity,
+    distance_cost_model,
     expansion_region,
     format_design_report,
     get_device,
@@ -69,4 +72,5 @@ from .lib import (
     simulate_trajectory,
     slab_mode,
     thermal_rabi_excitation,
+    transport_cost_model,
 )

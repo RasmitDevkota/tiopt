@@ -42,19 +42,30 @@ enum TransportEdgeType
 	FOUR_WAY_JUNCTION_SEGMENT = 1 << 2,
 };
 
+// Shuttling segment between zones of a trap graph, which joins each zone to the next (its zones are copies of zones of
+// the graph, which are matched by position); one ion at a time can move along it
 struct TransportEdge
 {
 	enum TransportEdgeType edge_type;
 	int n_zones;
 	struct ZoneNode *zone_nodes; // implicitly, length n_zones
+	double length; // length of the segment between neighboring zones (µm), or 0 for the distance between their centers
 };
 
+// Zones of a trap, joined by shuttling segments; ions only move along the segments, and junction zones (JUNCTION_ZONE)
+// join three or more segments and hold no ions between moves
 struct TrapGraph
 {
 	int n_zones;
 	int n_transport_edges;
 	struct ZoneNode *zone_nodes; // implicitly, length n_zones
 	struct TransportEdge *transport_edges; // implicitly, length n_transport_edges
+	double *route_lengths; // shortest distance along the segments between each pair of zones (µm, HUGE_VAL if there is
+	                       // no path), filled in by trap_graph_routes; implicitly, length n_zones-by-n_zones
+	int *route_next; // zone after the first on the shortest path between each pair of zones (-1 if there is none);
+	                 // implicitly, length n_zones-by-n_zones
+	double *segment_lengths; // length of the segment between each pair of neighboring zones (µm, -1 if they are not
+	                         // neighbors); implicitly, length n_zones-by-n_zones
 };
 
 // Trap data
@@ -168,6 +179,8 @@ struct InstructionNode
 	int n_prev_nodes;
 	struct InstructionNode *prev_nodes; // implicitly, length n_prev_nodes
 	int diagonal; // diagonal in the computational basis, so it commutes with every other diagonal operation
+	int n_ms_gates; // Mølmer-Sørensen gates which an operation on several ions takes (e.g. 3 for a swap)
+	int virtual_gate; // a rotation about Z, done by shifting the phase of later pulses, which takes no time
 };
 
 struct CircuitGraph
