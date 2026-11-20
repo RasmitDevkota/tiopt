@@ -70,6 +70,11 @@ int test_schedule_check_finds_violations
 	double atol
 );
 
+int test_qccd_cost_model_by_hand
+(
+	double atol
+);
+
 int test_lookahead_layers
 (
 	double atol

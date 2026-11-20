@@ -982,11 +982,15 @@ void free_schedule_trace(struct ScheduleTrace *trace)
     free(trace->transport_rounds);
     free(trace->initial_zones);
     free(trace->steps);
+    free(trace->operation_n_bars);
 
     trace->moves = NULL;
     trace->transport_rounds = NULL;
     trace->initial_zones = NULL;
     trace->steps = NULL;
+    trace->operation_n_bars = NULL;
+    trace->fidelity = 0.0;
+    trace->max_n_bar = 0.0;
     trace->n_rounds = 0;
     trace->n_moves = 0;
     trace->max_moves = 0;
@@ -1020,6 +1024,37 @@ enum OperationType get_operation_type(const char *op)
 int is_diagonal_gate(const char *op)
 {
     static const char *gates[] = { "z", "s", "sdg", "t", "tdg", "rz", "p", "cz", "cp", "crz", "rzz" };
+
+    size_t length = strcspn(op, "(");
+
+    for (size_t g = 0; g < sizeof(gates) / sizeof(gates[0]); g++) {
+        if (strlen(gates[g]) == length && strncmp(op, gates[g], length) == 0) return 1;
+    }
+
+    return 0;
+}
+
+// Number of Mølmer-Sørensen gates which a gate from QASM code on several qubits takes (ignoring its parameters), as in
+// tiopt.circuits.MS_PER_GATE
+int gate_ms_count(const char *op)
+{
+    static const char *gates[] = { "swap", "iswap", "cu3", "crx", "cry", "crz", "cp", "ch" };
+    static const int counts[] = { 3, 2, 2, 2, 2, 2, 2, 1 };
+
+    size_t length = strcspn(op, "(");
+
+    for (size_t g = 0; g < sizeof(gates) / sizeof(gates[0]); g++) {
+        if (strlen(gates[g]) == length && strncmp(op, gates[g], length) == 0) return counts[g];
+    }
+
+    return 1;
+}
+
+// Whether a gate from QASM code is a rotation about Z (ignoring its parameters), which is done by shifting the phase of
+// later pulses and so takes no time, as in tiopt.circuits.VIRTUAL_GATES
+int is_virtual_gate(const char *op)
+{
+    static const char *gates[] = { "id", "z", "s", "sdg", "t", "tdg", "rz", "p", "u1" };
 
     size_t length = strcspn(op, "(");
 
@@ -1187,6 +1222,8 @@ struct CircuitGraph* parse_qasm(const char *filename)
         // A gate which is not known would otherwise be left out of the schedule
         enum OperationType op_type = get_operation_type(token);
         int diagonal = is_diagonal_gate(token);
+        int n_ms_gates = gate_ms_count(token);
+        int virtual_gate = is_virtual_gate(token);
         if (op_type == 0) {
             printf("ERROR: Circuit contains unknown gate '%s' on line %d\n", token, line_number);
 
@@ -1213,6 +1250,8 @@ struct CircuitGraph* parse_qasm(const char *filename)
 
         node.operation_type = op_type;
         node.diagonal = diagonal;
+        node.n_ms_gates = n_ms_gates;
+        node.virtual_gate = virtual_gate;
         node.operation_duration = 0.0;
         node.graphindex = count + 1;
         node.n_target_ions = n_targets;

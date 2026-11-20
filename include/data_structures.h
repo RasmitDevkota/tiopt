@@ -179,6 +179,8 @@ struct InstructionNode
 	int n_prev_nodes;
 	struct InstructionNode *prev_nodes; // implicitly, length n_prev_nodes
 	int diagonal; // diagonal in the computational basis, so it commutes with every other diagonal operation
+	int n_ms_gates; // Mølmer-Sørensen gates which an operation on several ions takes (e.g. 3 for a swap)
+	int virtual_gate; // a rotation about Z, done by shifting the phase of later pulses, which takes no time
 };
 
 struct CircuitGraph

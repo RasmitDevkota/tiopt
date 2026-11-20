@@ -36,6 +36,7 @@ int test_all_transport
 	result += test_schedule_through_junction(atol);
 	result += test_three_ion_schedule_by_hand(atol);
 	result += test_schedule_check_finds_violations(atol);
+	result += test_qccd_cost_model_by_hand(atol);
 	result += test_lookahead_layers(atol);
 	result += test_commuting_layers(atol);
 
@@ -165,9 +166,13 @@ int test_generate_transport_schedule
 
 	struct CircuitGraph *circuit_graph = parse_qasm("quantumcircuits/test_0000.qasm");
 
+	// Times only count distance here
+	struct TransportCostModel cost_model = distance_transport_cost_model();
+	struct ScheduleOptions options = { DEFAULT_SCHEDULE_STRATEGY, DEFAULT_LOOKAHEAD_LAYERS, 0, &cost_model };
+
 	struct TransportProgram *transport_program = malloc(sizeof(struct TransportProgram));
 	struct ScheduleTrace trace = { 0 };
-	transport_program = generate_transport_schedule_strategy(&trap_graph, circuit_graph, transport_program, DEFAULT_SCHEDULE_STRATEGY, &trace);
+	transport_program = generate_transport_schedule_options(&trap_graph, circuit_graph, transport_program, &options, &trace);
 
 	if (transport_program == NULL)
 	{
@@ -431,9 +436,13 @@ int test_schedule_trace_times
 
 	struct CircuitGraph *circuit_graph = parse_qasm("quantumcircuits/test_0000.qasm");
 
+	// Times only count distance here
+	struct TransportCostModel cost_model = distance_transport_cost_model();
+	struct ScheduleOptions options = { SCHEDULE_ROUNDS, 1, 0, &cost_model };
+
 	struct TransportProgram *transport_program = malloc(sizeof(struct TransportProgram));
 	struct ScheduleTrace trace = { 0 };
-	if (generate_transport_schedule_strategy(&trap_graph, circuit_graph, transport_program, SCHEDULE_ROUNDS, &trace) == NULL)
+	if (generate_transport_schedule_options(&trap_graph, circuit_graph, transport_program, &options, &trace) == NULL)
 	{
 		free(transport_program);
 		free_schedule_trace(&trace);
@@ -492,14 +501,15 @@ int test_schedule_trace_times
 
 	// Worked out by hand: in the first round, ions 1 and 2 leave the chain in the load zone (zone 0) for the gate zone
 	// (zone 4), ion 2 one segment behind ion 1, so the operations start at 250 µs and end at 350 µs. In the second round,
-	// ions 1 and 2 go back into storage (zone 2), arriving at 450 µs and 500 µs, and ions 3 and 4 leave the load zone at
-	// 350 µs. They have to pass through the chain in storage: each merges into its front, swaps with ions 1 and 2 to its
-	// back, splits off and goes on, so ion 3 waits in zone 1 until storage is free at 500 µs and arrives at 650 µs, and
-	// ion 4 arrives one segment later, at 700 µs
+	// ions 1 and 2 go back into storage (zone 2): ion 2 merged into the front of the chain in the gate zone, which faces
+	// storage, so it goes first and arrives at 450 µs, and ion 1 follows a segment behind, at 500 µs. Ions 3 and 4 leave
+	// the load zone at 350 µs, and have to pass through the chain in storage: each merges into its front, swaps with
+	// ions 2 and 1 to its back, splits off and goes on, so ion 3 waits in zone 1 until storage is free at 500 µs and
+	// arrives at 650 µs, and ion 4 arrives one segment later, at 700 µs
 	double expected_departures[6] = { 0.0, 0.0, 350.0, 350.0, 350.0, 350.0 };
-	double expected_arrivals[6] = { 200.0, 250.0, 450.0, 500.0, 650.0, 700.0 };
+	double expected_arrivals[6] = { 200.0, 250.0, 500.0, 450.0, 650.0, 700.0 };
 	int expected_ions[6] = { 1, 2, 1, 2, 3, 4 };
-	int expected_swaps[6] = { 0, 0, 1, 0, 2, 2 };
+	int expected_swaps[6] = { 0, 0, 0, 0, 2, 2 };
 	for (int m = 0; m < MIN(trace.n_moves, 6); m++)
 	{
 		n_wrong += (trace.moves[m].ion != expected_ions[m]);
@@ -588,7 +598,7 @@ int test_schedule_through_junction
 	struct TrapGraph trap_graph;
 	generate_t_junction_graph(&trap_graph);
 
-	struct TransportCostModel cost_model = default_transport_cost_model();
+	struct TransportCostModel cost_model = distance_transport_cost_model();
 	cost_model.junction_y = 30E-6;
 	struct ScheduleOptions options = { SCHEDULE_ROUNDS, 1, 0, &cost_model };
 
@@ -887,16 +897,21 @@ int test_commuting_layers
 	return check_error("compute_commuting_layers moves commuting operations into fewer layers", n_wrong, 0);
 }
 
-// Schedule a circuit written to a file on a trap graph, returning NULL if it fails
+// Schedule a circuit written to a file on a trap graph with a cost model (or, if it is NULL, one which only counts
+// distance), returning NULL if it fails
 static struct TransportProgram* schedule_text
 (
 	const char *qasm,
 	struct TrapGraph *trap_graph,
 	enum ScheduleStrategy strategy,
+	const struct TransportCostModel *cost_model,
 	struct CircuitGraph **circuit_graph,
 	struct ScheduleTrace *trace
 )
 {
+	struct TransportCostModel distance_model = distance_transport_cost_model();
+	struct ScheduleOptions options = { strategy, 1, 0, (cost_model != NULL) ? cost_model : &distance_model };
+
 	char *filename = "check_test.qasm";
 	FILE *fp = fopen(filename, "w");
 	fputs(qasm, fp);
@@ -908,7 +923,7 @@ static struct TransportProgram* schedule_text
 		return NULL;
 
 	struct TransportProgram *program = calloc(1, sizeof(struct TransportProgram));
-	if (generate_transport_schedule_strategy(trap_graph, *circuit_graph, program, strategy, trace) == NULL)
+	if (generate_transport_schedule_options(trap_graph, *circuit_graph, program, &options, trace) == NULL)
 	{
 		free_transport_program(program);
 		return NULL;
@@ -944,16 +959,17 @@ int test_three_ion_schedule_by_hand
 	//   into its front at 400 µs, swaps past ions 2 and 1 to the back, splits off, and arrives at 500 µs
 	// - The gate (GATE_DURATION, 100 µs) and the measurement (DETECTION_DURATION, 200 µs) start at 500 µs, so the round
 	//   ends at 700 µs
-	// - Back into storage: ion 1 swaps with ion 2 to reach the front of the gate chain, splits off at 700 µs and arrives
-	//   at 900 µs; ion 2 follows a segment behind (1000 µs) and merges into the front of storage: [2, 1]; ion 3 waits
-	//   for the gate zone to be free at 800 µs and arrives at 1100 µs, merging into the front: [3, 2, 1]
+	// - Back into storage, the ions which pass no chain and need no swaps go first: ion 2, at the front of the gate
+	//   chain [2, 1], splits off at 700 µs and arrives at 900 µs; ion 1, now alone, follows a segment behind (1000 µs)
+	//   and merges into the front of storage: [1, 2]; ion 3 no longer has to pass a chain, waits for the gate zone to be
+	//   free at 800 µs and arrives at 1100 µs, merging into the front: [3, 1, 2]
 	struct TrapGraph trap_graph;
 	generate_check_graph(&trap_graph);
 
 	struct CircuitGraph *circuit_graph;
 	struct ScheduleTrace trace = { 0 };
 	struct TransportProgram *program = schedule_text("qubit[3] qreg;\nbit[3] creg;\ncx qreg[0], qreg[1];\nmeasure qreg[2] -> creg[2];\n",
-		&trap_graph, SCHEDULE_ROUNDS, &circuit_graph, &trace);
+		&trap_graph, SCHEDULE_ROUNDS, NULL, &circuit_graph, &trace);
 
 	int n_wrong = (program == NULL);
 	if (program != NULL)
@@ -966,8 +982,8 @@ int test_three_ion_schedule_by_hand
 
 		int expected_ions[6] = { 1, 2, 3, 1, 2, 3 };
 		double expected_departures[6] = { 0, 0, 100, 700, 700, 700 };
-		double expected_arrivals[6] = { 200, 300, 500, 900, 1000, 1100 };
-		int expected_swaps[6] = { 0, 0, 2, 1, 0, 0 };
+		double expected_arrivals[6] = { 200, 300, 500, 1000, 900, 1100 };
+		int expected_swaps[6] = { 0, 0, 2, 0, 0, 0 };
 		int swaps[6] = { 0 };
 		int n_splits = 0;
 		int n_merges = 0;
@@ -1062,9 +1078,11 @@ int test_schedule_check_finds_violations
 	struct TrapGraph trap_graph;
 	generate_check_graph(&trap_graph);
 
+	// The schedule of the three-ion test, where ion 3 passes through the chain of ions 2 and 1 in the gate zone
 	struct CircuitGraph *circuit_graph;
 	struct ScheduleTrace trace = { 0 };
-	struct TransportProgram *program = schedule_text("qubit[3] qreg;\ncx qreg[0], qreg[1];\n", &trap_graph, SCHEDULE_ROUNDS, &circuit_graph, &trace);
+	struct TransportProgram *program = schedule_text("qubit[3] qreg;\nbit[3] creg;\ncx qreg[0], qreg[1];\nmeasure qreg[2] -> creg[2];\n",
+		&trap_graph, SCHEDULE_ROUNDS, NULL, &circuit_graph, &trace);
 
 	if (program == NULL)
 		n_wrong++;
@@ -1073,7 +1091,7 @@ int test_schedule_check_finds_violations
 		struct ScheduleTrace broken = trace;
 		broken.steps = malloc(trace.n_steps * sizeof(struct TransportStep));
 
-		// Ion 1 leaves the gate zone without swapping past ion 2, which is in its way
+		// Ion 3 leaves the gate chain from its front, which it merged into, without swapping past ions 2 and 1
 		memcpy(broken.steps, trace.steps, trace.n_steps * sizeof(struct TransportStep));
 		remove_steps(&broken, is_swap, 0);
 		n_wrong += !finds(&trap_graph, circuit_graph, program, &broken, "from the middle, or from the end");
@@ -1099,7 +1117,7 @@ int test_schedule_check_finds_violations
 		// The gate starts before ion 2 arrives
 		memcpy(broken.steps, trace.steps, trace.n_steps * sizeof(struct TransportStep));
 		double arrival = program->arrival_times[0];
-		program->arrival_times[0] -= 50E-6;
+		program->arrival_times[0] -= 250E-6;
 		n_wrong += !finds(&trap_graph, circuit_graph, program, &broken, "starts before ion 2 arrives");
 		program->arrival_times[0] = arrival;
 
@@ -1126,7 +1144,9 @@ int test_schedule_check_finds_violations
 	circuit_graph = parse_qasm("quantumcircuits/test_0000.qasm");
 	trace = (struct ScheduleTrace) { 0 };
 	program = calloc(1, sizeof(struct TransportProgram));
-	if (generate_transport_schedule_strategy(&trap_graph, circuit_graph, program, SCHEDULE_ROUNDS, &trace) == NULL)
+	struct TransportCostModel cost_model = distance_transport_cost_model();
+	struct ScheduleOptions options = { SCHEDULE_ROUNDS, 1, 0, &cost_model };
+	if (generate_transport_schedule_options(&trap_graph, circuit_graph, program, &options, &trace) == NULL)
 		n_wrong++;
 	else
 	{
@@ -1142,4 +1162,53 @@ int test_schedule_check_finds_violations
 	free_trap_graph(&trap_graph);
 
 	return check_error("check_schedule_trace finds ions passing, colliding, jumping, early and over capacity", n_wrong, 0);
+}
+
+int test_qccd_cost_model_by_hand
+(
+	double atol
+)
+{
+	// The default cost model is that of tiopt.qccd: ions move at 20 µm/µs (5 µs for each 100 µm segment), a split or
+	// merge takes 80 µs, and an FM gate on a chain of 2 ions takes 100 µs. A cx gate on ions 1 and 2, which start in
+	// storage in the chain [1, 2]:
+	// - Ion 1 splits off from 0 to 80 µs (adding 0.1 quanta to it and to the chain it leaves), and moves to the gate zone
+	//   from 80 µs to 90 µs, gaining 0.01 quanta and 5 µs of background heating (100 quanta/s) on each segment: 0.121
+	// - Ion 2, left alone, takes the chain's 0.1 quanta and its heating since 0 (0.008), sets off when ion 1 leaves the
+	//   empty zone at 85 µs (gaining 5 µs of heating while it waits), reaches the gate zone at 95 µs (0.1295 quanta)
+	//   and merges into the chain there from 95 µs to 175 µs, which then holds 0.121 + 0.0005 (heating from 90 µs to
+	//   95 µs) + 0.1295 + 0.1 (the merge) quanta
+	// - The gate starts at 175 µs, after 80 µs more of heating, with n_bar = 0.359, and has fidelity
+	//   1 - 1E-6/µs 100 µs - 1E-4 2 / ln 2 (2 n_bar + 1)
+	struct TrapGraph trap_graph;
+	generate_check_graph(&trap_graph);
+
+	struct TransportCostModel cost_model = default_transport_cost_model();
+	struct CircuitGraph *circuit_graph;
+	struct ScheduleTrace trace = { 0 };
+	struct TransportProgram *program = schedule_text("qubit[2] qreg;\ncx qreg[0], qreg[1];\n", &trap_graph, SCHEDULE_ROUNDS, &cost_model, &circuit_graph, &trace);
+
+	int n_wrong = (program == NULL);
+	if (program != NULL)
+	{
+		double us = 1E-6;
+		double n_bar = 0.121 + 0.0005 + 0.1295 + 0.1 + 0.008;
+		double fidelity = 1.0 - 1E-4 - 1E-4 * 2.0 / log(2.0) * (2.0 * n_bar + 1.0);
+
+		n_wrong += (fabs(program->arrival_times[0] - 175 * us) > 1E-12);
+		n_wrong += (fabs(trace.moves[0].arrive - 90 * us) > 1E-12) + (fabs(trace.moves[1].arrive - 175 * us) > 1E-12);
+		n_wrong += (fabs(trace.operation_n_bars[0] - n_bar) > 1E-9);
+		n_wrong += (fabs(trace.max_n_bar - n_bar) > 1E-9);
+		n_wrong += (fabs(trace.fidelity - fidelity) > 1E-12);
+		n_wrong += (check_schedule_trace(&trap_graph, circuit_graph, program, &trace, &cost_model, NULL, 0) != 0);
+
+		free_transport_program(program);
+	}
+
+	free_schedule_trace(&trace);
+	if (circuit_graph != NULL)
+		free_circuit_graph(circuit_graph);
+	free_trap_graph(&trap_graph);
+
+	return check_error("the default cost model times, heats and scores a schedule as tiopt.qccd does", n_wrong, 0);
 }

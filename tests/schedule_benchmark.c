@@ -62,6 +62,8 @@ struct ScheduleResult
 	int n_merges; // merges of an ion into a chain
 	int n_swaps; // swaps of neighboring ions in a chain, to bring an ion to the end of its chain
 	int n_violations; // violations of the physical rules of shuttling found by check_schedule_trace
+	double fidelity; // estimated fidelity of the program in the cost model (that of tiopt.qccd)
+	double max_n_bar; // largest mean phonon number of a chain at a two-qubit gate
 	double run_time; // median time taken by the scheduler (s)
 };
 
@@ -110,24 +112,6 @@ static void silence_stdout
 		close(saved);
 		saved = -1;
 	}
-}
-
-// Duration of an operation, as in schedule_arrival_times
-static double operation_duration
-(
-	struct InstructionNode *node
-)
-{
-	if (node->operation_duration > 0.0)
-		return node->operation_duration;
-
-	if (node->operation_type & DETECT)
-		return DETECTION_DURATION;
-
-	if (node->operation_type & COOL)
-		return COOLING_DURATION;
-
-	return GATE_DURATION;
 }
 
 static enum ZoneType operation_zone_type
@@ -245,8 +229,11 @@ static void evaluate_schedule
 		result->makespan = MAX(result->makespan, step->end);
 		result->n_splits += (step->type == STEP_SPLIT);
 		result->n_merges += (step->type == STEP_MERGE);
-		result->n_swaps += (step->type == STEP_ION_SWAP);
+		result->n_swaps += (step->type == STEP_ION_SWAP || step->type == STEP_GATE_SWAP);
 	}
+
+	result->fidelity = trace->fidelity;
+	result->max_n_bar = trace->max_n_bar;
 
 	free(op_zones);
 	free(layer_moves);
@@ -350,7 +337,7 @@ int main
 	const char *csv_filename = (argc > 1) ? argv[1] : "schedule_benchmark.csv";
 	FILE *csv = fopen(csv_filename, "w");
 	if (csv != NULL)
-		fprintf(csv, "circuit,qubits,operations,layout,strategy,scheduled,invalid,violations,rounds,makespan_us,distance_um,moves,splits,merges,swaps,run_time_us\n");
+		fprintf(csv, "circuit,qubits,operations,layout,strategy,scheduled,invalid,violations,rounds,makespan_us,fidelity,max_n_bar,distance_um,moves,splits,merges,swaps,run_time_us\n");
 
 	int n_mismatches = 0;
 	int n_worse = 0;
@@ -369,7 +356,7 @@ int main
 		return 1;
 	}
 
-	printf("%-20s %-42s %-22s %7s %7s %12s %13s %7s %7s %12s\n", "circuit", "layout", "strategy", "valid", "rounds", "makespan(us)", "distance(um)", "moves", "swaps", "time(us)");
+	printf("%-20s %-42s %-22s %7s %7s %12s %9s %7s %13s %7s %7s %12s\n", "circuit", "layout", "strategy", "valid", "rounds", "makespan(us)", "fidelity", "n_bar", "distance(um)", "moves", "swaps", "time(us)");
 
 	for (int c = 0; c < n_entries; c++)
 	{
@@ -422,7 +409,8 @@ int main
 					// Every schedule is checked independently of the scheduler; the original schedulers (baseline and
 					// fast) move ions away before their operations when a layer does not fit, so theirs can fail
 					char message[1024];
-					result->n_violations = check_schedule_trace(&trap_graph, circuit_graph, programs[s], &traces[s], NULL, message, sizeof(message));
+					struct TransportCostModel cost_model = default_transport_cost_model();
+					result->n_violations = check_schedule_trace(&trap_graph, circuit_graph, programs[s], &traces[s], &cost_model, message, sizeof(message));
 					if (result->n_violations > 0 && s >= 2)
 					{
 						printf("  CHECK: %s breaks the rules of shuttling %d times, first: %.*s\n", strategy_names[s], result->n_violations, (int) strcspn(message, "\n"), message);
@@ -431,8 +419,7 @@ int main
 					else if (result->n_violations > 0)
 						n_original_violating++;
 
-					// Every operation must start once all of its ions have arrived, and the program must end with its last
-					// operation
+					// Every operation must start once all of its ions have arrived, at the arrival time of the program
 					int n_early = 0;
 					for (int m = 0; m < traces[s].n_moves; m++)
 					{
@@ -440,13 +427,15 @@ int main
 						n_early += (move->transport >= 0 && move->arrive > programs[s]->arrival_times[move->transport] + 1E-12);
 					}
 
-					double program_makespan = 0.0;
-					for (int i = 0; i < circuit_graph->n_instruction_nodes; i++)
-						program_makespan = MAX(program_makespan, programs[s]->arrival_times[i] + operation_duration(&circuit_graph->instruction_nodes[i]));
-
-					if (n_early > 0 || program_makespan > result->makespan * (1.0 + 1E-12))
+					for (int k = 0; k < traces[s].n_steps; k++)
 					{
-						printf("  TIMING: %s starts %d operations before their ions arrive, or ends at %.2f us after its last step at %.2f us\n", strategy_names[s], n_early, 1E6 * program_makespan, 1E6 * result->makespan);
+						struct TransportStep *step = &traces[s].steps[k];
+						n_early += (step->type == STEP_OPERATION && fabs(step->start - programs[s]->arrival_times[step->index]) > 1E-12);
+					}
+
+					if (n_early > 0)
+					{
+						printf("  TIMING: %s starts %d operations before their ions arrive, or not at their arrival time\n", strategy_names[s], n_early);
 						n_timing++;
 					}
 				}
@@ -476,12 +465,12 @@ int main
 
 				int valid = result->scheduled && result->n_invalid == 0 && result->n_violations == 0;
 				int n_rounds = (programs[s] != NULL) ? traces[s].n_rounds : 0;
-				printf("%-20s %-42s %-22s %7s %7d %12.2f %13.0f %7d %7d %12.2f\n", circuit_name, layouts[l], strategy_names[s],
-					!result->scheduled ? "fail" : valid ? "yes" : "NO", n_rounds, 1E6 * result->makespan, result->distance, result->n_moves, result->n_swaps, 1E6 * result->run_time);
+				printf("%-20s %-42s %-22s %7s %7d %12.2f %9.5f %7.3f %13.0f %7d %7d %12.2f\n", circuit_name, layouts[l], strategy_names[s],
+					!result->scheduled ? "fail" : valid ? "yes" : "NO", n_rounds, 1E6 * result->makespan, result->fidelity, result->max_n_bar, result->distance, result->n_moves, result->n_swaps, 1E6 * result->run_time);
 
 				if (csv != NULL)
-					fprintf(csv, "%s,%d,%d,\"%s\",%s,%d,%d,%d,%d,%.6f,%.3f,%d,%d,%d,%d,%.6f\n", circuit_name, circuit_graph->n_ions, circuit_graph->n_instruction_nodes, layouts[l], strategy_names[s],
-						result->scheduled, result->n_invalid, result->n_violations, n_rounds, 1E6 * result->makespan, result->distance, result->n_moves, result->n_splits, result->n_merges, result->n_swaps, 1E6 * result->run_time);
+					fprintf(csv, "%s,%d,%d,\"%s\",%s,%d,%d,%d,%d,%.6f,%.9f,%.6f,%.3f,%d,%d,%d,%d,%.6f\n", circuit_name, circuit_graph->n_ions, circuit_graph->n_instruction_nodes, layouts[l], strategy_names[s],
+						result->scheduled, result->n_invalid, result->n_violations, n_rounds, 1E6 * result->makespan, result->fidelity, result->max_n_bar, result->distance, result->n_moves, result->n_splits, result->n_merges, result->n_swaps, 1E6 * result->run_time);
 			}
 
 			// The fast scheduler must make exactly the same schedule as the baseline

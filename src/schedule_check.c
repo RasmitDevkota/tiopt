@@ -14,7 +14,7 @@
 // Checks a schedule independently of the scheduler which made it, by replaying the steps recorded in its trace against
 // the physical rules of shuttling: ions move only along the segments of the trap graph, one at a time on each segment,
 // and never pass each other (an ion goes past the ions in a zone only by merging into their chain, swapping its way to
-// the far end, and splitting off); an ion splits off or swaps only at the end of a chain and merges only into its end;
+// the far end, and splitting off, where it swaps with SWAP gates only in zones where gates can be done); an ion splits off or swaps only at the end of a chain and merges only into its end;
 // no zone holds more ions than its capacity between moves; and every operation finds its ions in a zone of its type.
 // Only the segments of the trap graph are used, never its routes.
 
@@ -574,6 +574,32 @@ int check_schedule_trace
 				}
 
 				cost = (cost_model != NULL) ? cost_model->split + cost_model->rotation + cost_model->merge : 0.0;
+				break;
+			}
+
+			case STEP_GATE_SWAP:
+			{
+				int a = position_in_chain(&check, zone, ion);
+				int b = position_in_chain(&check, zone, step->other_ion);
+				if (!(trap_graph->zone_nodes[zone].zone_type & GATE_ZONE))
+					violation(&check, "ions %d and %d swap with a SWAP gate in zone %d, where gates cannot be done", ion, step->other_ion, zone + 1);
+				if (a < 0 || b < 0 || a == b)
+					violation(&check, "ions %d and %d swap with a SWAP gate in zone %d, but are not both in the chain there", ion, step->other_ion, zone + 1);
+				else
+				{
+					int *chain = chain_of(&check, zone);
+					chain[a] = step->other_ion;
+					chain[b] = ion;
+				}
+
+				if (step->other_ion >= 1 && step->other_ion <= n_ions)
+				{
+					if (step->start < ion_busy[step->other_ion - 1] - CHECK_EPS)
+						violation(&check, "ion %d swaps with ion %d at %.3f us, while that ion is busy", ion, step->other_ion, 1E6 * step->start);
+					ion_busy[step->other_ion - 1] = MAX(ion_busy[step->other_ion - 1], step->end);
+				}
+
+				cost = (cost_model != NULL && a >= 0 && b >= 0) ? 3 * two_qubit_gate_time(cost_model, check.chain_lengths[zone], abs(a - b)) : 0.0;
 				break;
 			}
 

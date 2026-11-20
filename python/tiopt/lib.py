@@ -196,6 +196,8 @@ InstructionNode._fields_ = [
     ("n_prev_nodes", C.c_int),
     ("prev_nodes", C.POINTER(InstructionNode)),
     ("diagonal", C.c_int),
+    ("n_ms_gates", C.c_int),
+    ("virtual_gate", C.c_int),
 ]
 
 
@@ -261,11 +263,14 @@ class ScheduleTraceStruct(C.Structure):
         ("n_steps", C.c_int),
         ("max_steps", C.c_int),
         ("steps", C.POINTER(TransportStepStruct)),
+        ("fidelity", C.c_double),
+        ("max_n_bar", C.c_double),
+        ("operation_n_bars", _double_p),
     ]
 
 
 class TransportCostModelStruct(C.Structure):
-    """Mirror of struct TransportCostModel in transport.h (times in s, speed in µm/s)."""
+    """Mirror of struct TransportCostModel in transport.h (times in s, speed in µm/s, heating in quanta)."""
     _fields_ = [
         ("speed", C.c_double),
         ("min_move", C.c_double),
@@ -274,6 +279,22 @@ class TransportCostModelStruct(C.Structure):
         ("junction_y", C.c_double),
         ("junction_x", C.c_double),
         ("rotation", C.c_double),
+        ("swap_gates", C.c_int),
+        ("gate_model", C.c_int),
+        ("two_qubit", C.c_double),
+        ("single_qubit", C.c_double),
+        ("measurement", C.c_double),
+        ("cooling", C.c_double),
+        ("split_heating", C.c_double),
+        ("merge_heating", C.c_double),
+        ("junction_heating", C.c_double),
+        ("move_heating", C.c_double),
+        ("background_heating", C.c_double),
+        ("gate_background_error", C.c_double),
+        ("motional_error", C.c_double),
+        ("single_qubit_error", C.c_double),
+        ("measurement_error", C.c_double),
+        ("cooled_n_bar", C.c_double),
     ]
 
 
@@ -612,6 +633,8 @@ _prototype("generate_trap_graph", None, C.c_int, _int_p, _int_p, _double_p, C.c_
 _prototype("trap_graph_distance", C.c_double, C.POINTER(TrapGraphStruct), C.c_int, C.c_int)
 _prototype("trap_graph_route", C.c_int, C.POINTER(TrapGraphStruct), C.c_int, C.c_int, _int_p)
 _prototype("default_transport_cost_model", TransportCostModelStruct)
+_prototype("distance_transport_cost_model", TransportCostModelStruct)
+_prototype("two_qubit_gate_time", C.c_double, C.POINTER(TransportCostModelStruct), C.c_int, C.c_int)
 _prototype("check_schedule_trace", C.c_int, C.POINTER(TrapGraphStruct), C.POINTER(CircuitGraphStruct), C.POINTER(TransportProgramStruct),
            C.POINTER(ScheduleTraceStruct), C.POINTER(TransportCostModelStruct), C.c_char_p, C.c_int)
 _prototype("free_circuit_graph", None, C.POINTER(CircuitGraphStruct))
@@ -2560,7 +2583,43 @@ DEFAULT_LOOKAHEAD_LAYERS = int(constant("DEFAULT_LOOKAHEAD_LAYERS"))
 
 
 # Types of the steps of a schedule (enum TransportStepType in transport.h)
-SCHEDULE_STEP_TYPES = ("split", "move", "junction", "merge", "ion swap", "operation")
+SCHEDULE_STEP_TYPES = ("split", "move", "junction", "merge", "ion swap", "operation", "gate swap")
+
+# Gate models of the transport cost model (enum TransportGateModel in transport.h), as in tiopt.gates.GATE_MODELS
+TRANSPORT_GATE_MODELS = {"fixed": 0, "AM1": 1, "AM2": 2, "PM": 3, "FM": 4}
+
+
+def transport_cost_model(timing=None, noise=None):
+    """Cost model of the transport scheduler (TransportCostModelStruct) with the durations of a tiopt.qccd.TimingModel
+    and the heating and errors of a tiopt.qccd.NoiseModel (their defaults if None), converted from µs to s. The default
+    cost model of the scheduler is this one with the defaults of both. Reordering with "gate" swaps uses SWAP gates in
+    zones where gates can be done, and swaps ions physically elsewhere.
+    """
+    from . import qccd
+
+    timing = qccd.TimingModel() if timing is None else timing
+    noise = qccd.NoiseModel() if noise is None else noise
+    if timing.gate_model not in TRANSPORT_GATE_MODELS:
+        raise ValueError(f"unknown gate model {timing.gate_model!r}; choose from AM1, AM2, PM, FM")
+    us = 1e-6
+    return TransportCostModelStruct(
+        speed=timing.speed / us, min_move=timing.min_move * us, split=timing.split * us, merge=timing.merge * us,
+        junction_y=timing.junction_y * us, junction_x=timing.junction_x * us, rotation=timing.rotation * us,
+        swap_gates=int(timing.swap_type == "gate"), gate_model=TRANSPORT_GATE_MODELS[timing.gate_model],
+        two_qubit=float(constant("GATE_DURATION")), single_qubit=timing.single_qubit * us,
+        measurement=timing.measurement * us, cooling=noise.cooling_time * us, split_heating=noise.split_heating,
+        merge_heating=noise.merge_heating, junction_heating=noise.junction_heating, move_heating=noise.move_heating,
+        background_heating=noise.background_heating / us, gate_background_error=noise.gate_background_error / us,
+        motional_error=noise.motional_error, single_qubit_error=noise.single_qubit_error,
+        measurement_error=noise.measurement_error, cooled_n_bar=noise.cooled_n_bar)
+
+
+def distance_cost_model():
+    """Cost model of the transport scheduler which only counts the distance ions move (see
+    distance_transport_cost_model in transport.h): moves at TRANSPORT_SPEED_LIMIT, other steps take no time, and
+    operations take GATE_DURATION, DETECTION_DURATION and COOLING_DURATION.
+    """
+    return _lib.distance_transport_cost_model()
 
 
 @dataclass
@@ -2598,7 +2657,7 @@ class TransportProgram:
     ions (including the moves back into storage between operations) and when it happens.
     """
 
-    def __init__(self, trap_graph, circuit, strategy=None, lookahead_layers=None, commute=False):
+    def __init__(self, trap_graph, circuit, strategy=None, lookahead_layers=None, commute=False, cost_model=None):
         """Schedule the transports of a circuit on the zones of a TrapGraph.
 
         Args:
@@ -2610,6 +2669,9 @@ class TransportProgram:
                 DEFAULT_LOOKAHEAD_LAYERS if None).
             commute: Move operations which are diagonal in the computational basis (rz, rzz, cz, cp, ..., which commute
                 with each other) into fewer layers before scheduling; the layers of the circuit itself are unchanged.
+            cost_model: Durations, heating and errors of the steps and operations (see transport_cost_model, which
+                makes one from a tiopt.qccd.TimingModel and NoiseModel, and distance_cost_model), or None for the
+                defaults of tiopt.qccd.
         """
         if strategy is None:
             strategy_value = _lib.default_schedule_strategy()
@@ -2619,7 +2681,8 @@ class TransportProgram:
             raise ValueError(f"unknown strategy {strategy!r}; choose from {', '.join(SCHEDULE_STRATEGIES)}")
         self.lookahead_layers = max(int(DEFAULT_LOOKAHEAD_LAYERS if lookahead_layers is None else lookahead_layers), 1)
         self.commute = bool(commute)
-        options = ScheduleOptionsStruct(strategy_value, self.lookahead_layers, int(self.commute))
+        self.cost_model = _lib.default_transport_cost_model() if cost_model is None else cost_model
+        options = ScheduleOptionsStruct(strategy_value, self.lookahead_layers, int(self.commute), C.pointer(self.cost_model))
         self._pointer = None
         self._trace = ScheduleTraceStruct()
         memory = _libc.malloc(C.sizeof(TransportProgramStruct))
@@ -2698,20 +2761,37 @@ class TransportProgram:
         along the segments of the trap graph, one at a time on each, and never pass each other (only by merging into
         a chain, swapping to its far end, and splitting off again); they split off, swap, and merge only at the ends of
         chains; zones hold no more ions than their capacity between moves; every operation finds its ions in a zone of
-        its type; and no step is shorter than in the default cost model.
+        its type; and no step is shorter than in the cost model of the program.
 
         Returns:
             Descriptions of the violations found (the first ten, and how many more there are), or [] if there are none.
         """
         buffer = C.create_string_buffer(4096)
-        cost_model = _lib.default_transport_cost_model()
         n = _lib.check_schedule_trace(C.byref(self.trap_graph.struct), self._circuit._pointer, self._pointer,
-                                      C.byref(self._trace), C.byref(cost_model), buffer, len(buffer))
+                                      C.byref(self._trace), C.byref(self.cost_model), buffer, len(buffer))
         flush_c_output()
         messages = [line for line in buffer.value.decode(errors="replace").splitlines() if line]
         if n > len(messages):
             messages.append(f"... and {n - len(messages)} more")
         return messages
+
+    @property
+    def fidelity(self):
+        """Estimated fidelity of the program: the product of the fidelities of its operations and SWAP gates, where a
+        two-qubit gate has 1 - gate_background_error tau - A (2 n_bar + 1) with A = motional_error N / ln N for a chain
+        of N ions with mean phonon number n_bar (the model of tiopt.qccd).
+        """
+        return float(self._trace.fidelity)
+
+    @property
+    def max_n_bar(self):
+        """Largest mean phonon number of a chain at a two-qubit gate."""
+        return float(self._trace.max_n_bar)
+
+    @property
+    def operation_n_bars(self):
+        """Mean phonon number of the chain of each operation when it starts."""
+        return _from_pointer(self._trace.operation_n_bars, self.n_transports)
 
     @property
     def initial_zones(self):

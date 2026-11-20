@@ -34,7 +34,8 @@ def test_transport_schedule(circuit):
     trap_graph = tiopt.TrapGraph(ZONES, CAPACITIES, -150.0, 150.0)
     np.testing.assert_allclose(trap_graph.positions[:, 0], np.linspace(-150, 150, 7))
 
-    program = tiopt.TransportProgram(trap_graph, circuit)
+    # Times only count distance here
+    program = tiopt.TransportProgram(trap_graph, circuit, cost_model=tiopt.distance_cost_model())
     assert (program.n_ions, program.n_transports) == (4, 11)
     np.testing.assert_allclose(program.initial_positions[:, 0], -150.0)
     # Gates happen in the gate zone and the measurement in the measure zone
@@ -85,7 +86,8 @@ def test_waveform_for_schedule(solved_trap, ion, circuit):
 
 def test_program_times_every_move(circuit):
     trap_graph = tiopt.TrapGraph(ZONES, CAPACITIES, -150.0, 150.0)
-    program = tiopt.TransportProgram(trap_graph, circuit, "rounds")
+    # Times only count distance here
+    program = tiopt.TransportProgram(trap_graph, circuit, "rounds", cost_model=tiopt.distance_cost_model())
     moves = program.moves
     assert program.n_rounds == 9
     np.testing.assert_array_equal(np.unique(program.rounds), np.arange(1, 10))
@@ -244,3 +246,67 @@ def test_check_finds_no_violations_in_valid_schedules(circuit):
     baseline = tiopt.TransportProgram(tiopt.TrapGraph(ZONES, CAPACITIES, -150.0, 150.0), circuit, "baseline")
     violations = baseline.check()
     assert violations and any("is not in the chain there" in v for v in violations)
+
+
+def test_default_cost_model_is_qccd():
+    from tiopt import gates, qccd
+
+    # The scheduler's default cost model has the durations, heating and errors of tiopt.qccd, in s rather than µs
+    default = tiopt.lib._lib.default_transport_cost_model()
+    from_qccd = tiopt.transport_cost_model(qccd.TimingModel(), qccd.NoiseModel())
+    for name, _ in tiopt.lib.TransportCostModelStruct._fields_:
+        assert getattr(default, name) == pytest.approx(getattr(from_qccd, name), rel=1e-12), name
+    assert default.speed == pytest.approx(20e6) and default.split == pytest.approx(80e-6)
+    # Its gate model gives the durations of tiopt.gates
+    for n_ions, separation in ((2, 1), (8, 3), (16, 7)):
+        assert tiopt.lib._lib.two_qubit_gate_time(default, n_ions, separation) == pytest.approx(
+            1e-6 * gates.gate_time_model("FM", n_ions, separation))
+
+
+def test_move_through_junction_takes_qccd_time(tmp_path):
+    from tiopt import qccd
+
+    # Two ions in storage go through a Y junction to a gate trap: the first splits off, moves along both segments, and
+    # crosses the junction, as QCCDSim's travel time without the merge (its destination is empty)
+    architecture = qccd.Architecture()
+    storage = architecture.add_trap("S", 4, (-200.0, 0.0), gate_zone=False)
+    junction = architecture.add_junction("J", (0.0, 0.0))
+    upper = architecture.add_trap("G1", 2, (150.0, 100.0))
+    lower = architecture.add_trap("G2", 2, (150.0, -100.0))
+    architecture.connect(storage, junction, 200.0)
+    architecture.connect(junction, upper, 180.0)
+    architecture.connect(junction, lower, 180.0)
+    timing = qccd.TimingModel()
+
+    qasm = tmp_path / "pair.qasm"
+    qasm.write_text("qubit[2] qreg;\ncx qreg[0], qreg[1];\n")
+    program = tiopt.TransportProgram(tiopt.TrapGraph.from_architecture(architecture), tiopt.Circuit(str(qasm)))
+    first = program.moves[0]
+    expected = timing.split + timing.move_time(200.0) + timing.junction_y + timing.move_time(180.0)
+    assert (first.arrive - first.depart) * 1e6 == pytest.approx(expected)
+    # The second merges into the chain there, which QCCDSim also counts
+    compiler_time = qccd._Compiler(architecture, timing, qccd.NoiseModel(), 2)
+    compiler_time.location = {0: storage, 1: storage}
+    assert compiler_time.travel_time(0, upper) == pytest.approx(expected + timing.merge)
+    assert program.check() == []
+
+
+def test_fidelity_follows_qccd_noise_model(tmp_path):
+    from tiopt import gates, qccd
+
+    # Two cx gates on the same pair: with lookahead the ions stay in the gate zone, so the only operations are the two
+    # gates, each with the fidelity 1 - gamma tau - A (2 n_bar + 1) of tiopt.qccd at the mean phonon number of the chain
+    qasm = tmp_path / "twice.qasm"
+    qasm.write_text("qubit[2] qreg;\ncx qreg[0], qreg[1];\ncx qreg[0], qreg[1];\n")
+    graph = tiopt.TrapGraph.from_layout("load+storage, empty, gate, measure", 100.0, 2)
+    program = tiopt.TransportProgram(graph, tiopt.Circuit(str(qasm)), "lookahead")
+    noise = qccd.NoiseModel()
+    tau = gates.gate_time_model("FM", 2, 1)
+    n_bars = program.operation_n_bars
+    assert n_bars[1] == pytest.approx(n_bars[0] + noise.background_heating * tau)
+    a = noise.motional_error * 2 / np.log(2)
+    expected = np.prod([1 - noise.gate_background_error * tau - a * (2 * n + 1) for n in n_bars])
+    assert program.fidelity == pytest.approx(expected, rel=1e-12)
+    assert program.max_n_bar == pytest.approx(n_bars.max())
+    assert not any(step.type == "gate swap" for step in program.steps)
+    assert program.check() == []
