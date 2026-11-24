@@ -13,8 +13,14 @@ enum ScheduleStrategy
                         // (or within ScheduleOptions.lookahead_layers layers) and can happen there
     SCHEDULE_LAYER_ASSIGN, // as SCHEDULE_LOOKAHEAD, but the operations of each round are assigned to zones together,
                            // to minimize the longest transport of the round
+    SCHEDULE_STAY, // as SCHEDULE_ROUNDS (the default), but ions stay where they are after each operation instead of
+                   // going back into storage (as in tiopt.qccd), so that an operation usually brings one ion to where
+                   // its partner is; when no zone of its type has room, ions are moved into storage, those whose next
+                   // operation comes last first, and those which a later operation of the layer needs only if nothing
+                   // else of the round could happen
 };
 
+// Strategy which generate_transport_schedule and TransportProgram use when none is given
 #ifndef DEFAULT_SCHEDULE_STRATEGY
 #define DEFAULT_SCHEDULE_STRATEGY SCHEDULE_ROUNDS
 #endif
@@ -39,7 +45,9 @@ enum TransportGateModel
 // How an ion reaches the end of its chain in a zone where gates can be done, to leave it or pass through it
 enum TransportSwapMethod
 {
-    SWAP_PHYSICAL, // swapping places with each ion on the way (a split, a rotation and a merge each)
+    SWAP_PHYSICAL, // swapping places with each ion on the way (a rotation each, with a split and a merge on each side
+                   // of the pair where the chain goes on: two in the middle of the chain, and otherwise one, as in
+                   // tiopt.qccd)
     SWAP_GATES, // a SWAP gate (three two-qubit gates) with the ion at the end (the "gate" swaps of tiopt.qccd)
     SWAP_CHEAPER, // whichever costs the schedule less fidelity, by the estimate of swap_gate_is_cheaper in circuits.c
 };
@@ -55,7 +63,8 @@ struct TransportCostModel
     double merge; // merging an ion into the end of a chain (s)
     double junction_y; // crossing a junction of three segments (s)
     double junction_x; // crossing a junction of four or more segments (s)
-    double rotation; // rotating two neighboring ions to swap them, which also takes a split and a merge (s)
+    double rotation; // rotating two neighboring ions to swap them, which also takes a split and a merge (two of each
+                     // in the middle of a chain, where the pair is split off on both sides) (s)
     int swap_gates; // enum TransportSwapMethod: how an ion reaches the end of its chain in a zone where gates can be
                     // done (elsewhere, it always swaps places with each ion on the way)
     int gate_model; // enum TransportGateModel
@@ -134,10 +143,11 @@ struct TransportStep
 };
 
 // Every move of the ions made by a schedule, in order, including the moves back into storage which the transport
-// program does not record, and the round of each transport: the operations of a round happen at once, after the ions
-// of the round have all arrived, and a layer of the circuit takes several rounds if its operations do not all fit in
-// the zones at once. The steps carry out the moves along the segments of the trap graph: the ions of a zone form a
-// chain, which starts at the end facing its neighbor with the lowest index, and starts out in the order of the ions
+// program does not record, and the round of each transport: the operations of a round happen after the ions of the
+// round have all arrived (at once, except that operations on several ions take the chain of their zone one after
+// another), and a layer of the circuit takes several rounds if its operations do not all fit in the zones at once. The
+// steps carry out the moves along the segments of the trap graph: the ions of a zone form a chain, which starts at the
+// end facing its neighbor with the lowest index, and starts out in the order of the ions
 struct ScheduleTrace
 {
     int n_moves;

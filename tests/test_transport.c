@@ -39,6 +39,10 @@ int test_all_transport
 	result += test_qccd_cost_model_by_hand(atol);
 	result += test_lookahead_layers(atol);
 	result += test_commuting_layers(atol);
+	result += test_gates_take_chain_in_turn(atol);
+	result += test_mid_chain_swap_cost(atol);
+	result += test_cycle_breaker_in_storage_zones(atol);
+	result += test_stay_evicts_ion_needed_last(atol);
 
 	return result;
 }
@@ -84,27 +88,32 @@ int test_parse_qasm
 	if (circuit_graph == NULL)
 		return check_error("parse_qasm reads test circuit", HUGE_VAL, 0);
 
-	// h, x, y, z on each qubit, then three layers of pairs of two-qubit gates, then a measurement of every qubit
-	int expected_n_targets[11] = { 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 4 };
-	int expected_targets[11][4] = { { 1 }, { 2 }, { 3 }, { 4 }, { 1, 2 }, { 3, 4 }, { 1, 3 }, { 2, 4 }, { 1, 4 }, { 2, 3 }, { 1, 2, 3, 4 } };
-	int expected_layers[11] = { 1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5 };
-	int expected_n_prev_nodes[11] = { 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 2 };
+	// h, x, y, z on each qubit, then three layers of pairs of two-qubit gates, then a measurement of every qubit, which
+	// measures each qubit on its own
+	int expected_n_targets[14] = { 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1 };
+	int expected_targets[14][2] = { { 1 }, { 2 }, { 3 }, { 4 }, { 1, 2 }, { 3, 4 }, { 1, 3 }, { 2, 4 }, { 1, 4 }, { 2, 3 }, { 1 }, { 2 }, { 3 }, { 4 } };
+	int expected_layers[14] = { 1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 5, 5 };
+	int expected_n_prev_nodes[14] = { 0, 0, 0, 0, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1 };
 
-	int n_wrong = (circuit_graph->n_ions != 4) + (circuit_graph->n_instruction_nodes != 11);
+	int n_wrong = (circuit_graph->n_ions != 4) + (circuit_graph->n_instruction_nodes != 14);
 
-	for (int i = 0; i < MIN(circuit_graph->n_instruction_nodes, 11); i++)
+	for (int i = 0; i < MIN(circuit_graph->n_instruction_nodes, 14); i++)
 	{
 		struct InstructionNode *node = &circuit_graph->instruction_nodes[i];
 
 		n_wrong += (node->n_target_ions != expected_n_targets[i]);
-		n_wrong += (node->operation_type != ((i == 10) ? DETECT : QUBIT));
+		n_wrong += (node->operation_type != ((i >= 10) ? DETECT : QUBIT));
 		n_wrong += (node->graphindex != i + 1);
 		n_wrong += (node->n_prev_nodes != expected_n_prev_nodes[i]);
 		n_wrong += (circuit_graph->layer_idxs[i] != expected_layers[i]);
 
-		for (int t = 0; t < MIN(node->n_target_ions, 4); t++)
+		for (int t = 0; t < MIN(node->n_target_ions, 2); t++)
 			n_wrong += (node->target_ions[t] != expected_targets[i][t]);
 	}
+
+	// The measurement of qubit 0 follows the CZ on qubits 0 and 3, its last gate
+	if (circuit_graph->n_instruction_nodes == 14)
+		n_wrong += (circuit_graph->instruction_nodes[10].prev_nodes[0].graphindex != 9);
 
 	// The CZ on qubits 0 and 3 follows the CY on qubits 0 and 2 and the CZ on qubits 1 and 3
 	struct InstructionNode *cz = &circuit_graph->instruction_nodes[8];
@@ -168,7 +177,8 @@ int test_generate_transport_schedule
 
 	// Times only count distance here
 	struct TransportCostModel cost_model = distance_transport_cost_model();
-	struct ScheduleOptions options = { DEFAULT_SCHEDULE_STRATEGY, DEFAULT_LOOKAHEAD_LAYERS, 0, &cost_model };
+	// Rounds, whose ions go back into storage after each layer (SCHEDULE_STAY leaves them in place)
+	struct ScheduleOptions options = { SCHEDULE_ROUNDS, DEFAULT_LOOKAHEAD_LAYERS, 0, &cost_model };
 
 	struct TransportProgram *transport_program = malloc(sizeof(struct TransportProgram));
 	struct ScheduleTrace trace = { 0 };
@@ -182,29 +192,30 @@ int test_generate_transport_schedule
 		return check_error("generate_transport_schedule succeeds", HUGE_VAL, 0);
 	}
 
-	int n_wrong = (transport_program->n_ions != 4) + (transport_program->n_transports != 11);
+	int n_wrong = (transport_program->n_ions != 4) + (transport_program->n_transports != 14);
 
 	// Ions start in the load zone, and are transported to the gate zone for gates and to the measure zone for detection
 	for (int i = 0; i < 4; i++)
 		n_wrong += (fabs(transport_program->initial_positions[i][0] + 150.0) > atol);
 
-	for (int t = 0; t < MIN(transport_program->n_transports, 11); t++)
+	for (int t = 0; t < MIN(transport_program->n_transports, 14); t++)
 	{
-		double x_expected = (t == 10) ? 150.0 : 50.0;
+		double x_expected = (t >= 10) ? 150.0 : 50.0;
 
 		n_wrong += (fabs(transport_program->destinations[t][0] - x_expected) > atol);
 		n_wrong += (fabs(transport_program->destinations[t][2] - ION_HEIGHT) > atol);
 	}
 
 	// The gate zone only holds two ions, so each layer runs in rounds which fit in it: the four single-qubit gates of
-	// the first layer in two rounds, each pair of two-qubit gates in two more, and the measurement of every qubit in one
-	int expected_rounds[11] = { 1, 1, 2, 2, 3, 4, 5, 6, 7, 8, 9 };
+	// the first layer in two rounds, each pair of two-qubit gates in two more, and the measurements of every qubit in one
+	int expected_rounds[14] = { 1, 1, 2, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 9 };
 	n_wrong += (trace.n_rounds != 9);
-	for (int t = 0; t < MIN(transport_program->n_transports, 11); t++)
+	for (int t = 0; t < MIN(transport_program->n_transports, 14); t++)
 		n_wrong += (trace.transport_rounds[t] != expected_rounds[t]);
 
-	// Transports in the same round arrive together, and later rounds arrive later
-	for (int t = 1; t < MIN(transport_program->n_transports, 11); t++)
+	// Transports in the same round arrive together (no round holds two gates on several ions in one zone), and later
+	// rounds arrive later
+	for (int t = 1; t < MIN(transport_program->n_transports, 14); t++)
 	{
 		int same_round = trace.transport_rounds[t] == trace.transport_rounds[t-1];
 
@@ -243,9 +254,10 @@ int test_parse_parameterized_gates
 	int n_wrong = (circuit_graph == NULL);
 	if (circuit_graph != NULL)
 	{
-		int expected_targets[6] = { 1, 1, 2, 2, 2, 3 };
-		n_wrong += (circuit_graph->n_instruction_nodes != 6);
-		for (int i = 0; i < MIN(circuit_graph->n_instruction_nodes, 6); i++)
+		// The measurement of the register measures each of its three qubits on its own
+		int expected_targets[8] = { 1, 1, 2, 2, 2, 1, 1, 1 };
+		n_wrong += (circuit_graph->n_instruction_nodes != 8);
+		for (int i = 0; i < MIN(circuit_graph->n_instruction_nodes, 8); i++)
 			n_wrong += (circuit_graph->instruction_nodes[i].n_target_ions != expected_targets[i]);
 
 		free_circuit_graph(circuit_graph);
@@ -1211,4 +1223,219 @@ int test_qccd_cost_model_by_hand
 	free_trap_graph(&trap_graph);
 
 	return check_error("the default cost model times, heats and scores a schedule as tiopt.qccd does", n_wrong, 0);
+}
+
+int test_gates_take_chain_in_turn
+(
+	double atol
+)
+{
+	// Four ions start in storage, and a gate zone holds all four: the two cx gates of the first layer both run there,
+	// one after the other (Mølmer-Sørensen gates drive the motion of the whole chain), while the single-qubit gates of
+	// the second layer, which also all run there, happen together
+	enum ZoneType zone_types[3] = { LOAD_ZONE | STORAGE_ZONE, GATE_ZONE, MEASURE_ZONE };
+	int zone_capacities[3] = { 4, 4, 4 };
+	struct TrapGraph trap_graph;
+	generate_linear_trap_graph(3, zone_types, zone_capacities, 0.0, 200.0, ION_HEIGHT, &trap_graph);
+
+	struct TransportCostModel cost_model = default_transport_cost_model();
+	struct CircuitGraph *circuit_graph;
+	struct ScheduleTrace trace = { 0 };
+	struct TransportProgram *program = schedule_text(
+		"qubit[4] qreg;\ncx qreg[0], qreg[1];\ncx qreg[2], qreg[3];\nh qreg[0];\nh qreg[1];\nh qreg[2];\nh qreg[3];\n",
+		&trap_graph, SCHEDULE_ROUNDS, &cost_model, &circuit_graph, &trace
+	);
+
+	int n_wrong = (program == NULL);
+	if (program != NULL)
+	{
+		struct TransportStep *ops[6] = { NULL };
+		for (int k = 0; k < trace.n_steps; k++)
+			if (trace.steps[k].type == STEP_OPERATION && trace.steps[k].index < 6)
+				ops[trace.steps[k].index] = &trace.steps[k];
+
+		for (int i = 0; i < 6; i++)
+			n_wrong += (ops[i] == NULL || ops[i]->zone != 1);
+
+		if (n_wrong == 0)
+		{
+			// The gates share a round and the zone, and the second starts when the first ends
+			n_wrong += (trace.transport_rounds[0] != trace.transport_rounds[1]);
+			struct TransportStep *first = (ops[0]->start <= ops[1]->start) ? ops[0] : ops[1];
+			struct TransportStep *second = (first == ops[0]) ? ops[1] : ops[0];
+			n_wrong += (fabs(second->start - first->end) > 1E-12);
+			n_wrong += (fabs(program->arrival_times[second->index] - second->start) > 1E-12);
+
+			// The single-qubit gates run together
+			for (int i = 3; i < 6; i++)
+				n_wrong += (trace.transport_rounds[i] != trace.transport_rounds[2]) + (fabs(ops[i]->start - ops[2]->start) > 1E-12);
+		}
+
+		n_wrong += (check_schedule_trace(&trap_graph, circuit_graph, program, &trace, &cost_model, NULL, 0) != 0);
+
+		free_transport_program(program);
+	}
+
+	free_schedule_trace(&trace);
+	if (circuit_graph != NULL)
+		free_circuit_graph(circuit_graph);
+	free_trap_graph(&trap_graph);
+
+	return check_error("gates on several ions take the chain of their zone one after another", n_wrong, 0);
+}
+
+int test_mid_chain_swap_cost
+(
+	double atol
+)
+{
+	// Four ions start in storage in the chain [1, 2, 3, 4], whose front faces the gate zone. Ion 3 goes first (it needs
+	// the fewest swaps to reach the front): it swaps with ion 2 in the middle of the chain, which splits the pair off on
+	// both sides, rotates it, and merges it back on both sides (2 x 80 + 42 + 2 x 80 = 362 µs), and then with ion 1 at
+	// the end of the chain, which takes one split and one merge (80 + 42 + 80 = 202 µs)
+	enum ZoneType zone_types[3] = { LOAD_ZONE | STORAGE_ZONE, GATE_ZONE, MEASURE_ZONE };
+	int zone_capacities[3] = { 4, 2, 4 };
+	struct TrapGraph trap_graph;
+	generate_linear_trap_graph(3, zone_types, zone_capacities, 0.0, 200.0, ION_HEIGHT, &trap_graph);
+
+	struct TransportCostModel cost_model = default_transport_cost_model();
+	struct CircuitGraph *circuit_graph;
+	struct ScheduleTrace trace = { 0 };
+	struct TransportProgram *program = schedule_text("qubit[4] qreg;\nx qreg[2];\nx qreg[3];\n", &trap_graph,
+		SCHEDULE_ROUNDS, &cost_model, &circuit_graph, &trace);
+
+	int n_wrong = (program == NULL);
+	if (program != NULL)
+	{
+		double us = 1E-6;
+		double expected[2] = { 362 * us, 202 * us };
+		int expected_others[2] = { 2, 1 };
+		int n_swaps = 0;
+
+		for (int k = 0; k < trace.n_steps; k++)
+		{
+			struct TransportStep *step = &trace.steps[k];
+			if (step->type != STEP_ION_SWAP || step->ion != 3)
+				continue;
+
+			if (n_swaps < 2)
+				n_wrong += (fabs(step->end - step->start - expected[n_swaps]) > 1E-12) + (step->other_ion != expected_others[n_swaps]);
+			n_swaps++;
+		}
+
+		n_wrong += (n_swaps != 2);
+		n_wrong += (check_schedule_trace(&trap_graph, circuit_graph, program, &trace, &cost_model, NULL, 0) != 0);
+
+		free_transport_program(program);
+	}
+
+	free_schedule_trace(&trace);
+	if (circuit_graph != NULL)
+		free_circuit_graph(circuit_graph);
+	free_trap_graph(&trap_graph);
+
+	return check_error("a physical swap in the middle of a chain takes two splits and two merges", n_wrong, 0);
+}
+
+int test_cycle_breaker_in_storage_zones
+(
+	double atol
+)
+{
+	// Two gate zones which can also store ions hold [1, 2] and [3, 4] after the first layer; the second layer pairs
+	// ions across them, so the zones would exchange ions while both are full. One ion has to leave for storage first,
+	// although it waits in a zone which can store it
+	enum ZoneType zone_types[4] = { LOAD_ZONE | STORAGE_ZONE, GATE_ZONE | STORAGE_ZONE, GATE_ZONE | STORAGE_ZONE, MEASURE_ZONE };
+	int zone_capacities[4] = { 4, 2, 2, 4 };
+	struct TrapGraph trap_graph;
+	generate_linear_trap_graph(4, zone_types, zone_capacities, 0.0, 300.0, ION_HEIGHT, &trap_graph);
+
+	struct TransportCostModel cost_model = default_transport_cost_model();
+	struct CircuitGraph *circuit_graph;
+	struct ScheduleTrace trace = { 0 };
+	struct TransportProgram *program = schedule_text(
+		"qubit[4] qreg;\ncx qreg[0], qreg[1];\ncx qreg[2], qreg[3];\ncx qreg[0], qreg[2];\ncx qreg[1], qreg[3];\n",
+		&trap_graph, SCHEDULE_LAYER_ASSIGN, &cost_model, &circuit_graph, &trace
+	);
+
+	int n_wrong = (program == NULL);
+	if (program != NULL)
+	{
+		char message[1024];
+		int n_violations = check_schedule_trace(&trap_graph, circuit_graph, program, &trace, &cost_model, message, sizeof(message));
+		if (n_violations != 0)
+			printf("%s", message);
+		n_wrong += n_violations;
+
+		// One ion of the second layer goes back to storage before it goes on
+		int n_evicted = 0;
+		for (int m = 0; m < trace.n_moves; m++)
+			n_evicted += (trace.moves[m].transport < 0 && trace.moves[m].to_zone == 0);
+		n_wrong += (n_evicted != 1);
+
+		free_transport_program(program);
+	}
+
+	free_schedule_trace(&trace);
+	if (circuit_graph != NULL)
+		free_circuit_graph(circuit_graph);
+	free_trap_graph(&trap_graph);
+
+	return check_error("full zones which can store ions exchange ions through storage", n_wrong, 0);
+}
+
+int test_stay_evicts_ion_needed_last
+(
+	double atol
+)
+{
+	// A gate zone holds three ions. The first layer brings ions 1 and 2 (for a cx) and ion 3 (for an x) into it, and
+	// with SCHEDULE_STAY they stay there. The cx on ions 3 and 4 of the second layer needs room for ion 4, so one of
+	// ions 1 and 2 moves back into storage: ion 2, which no later operation needs (ion 1 has an x in the third layer,
+	// which it takes where it is)
+	enum ZoneType zone_types[2] = { LOAD_ZONE | STORAGE_ZONE, GATE_ZONE };
+	int zone_capacities[2] = { 4, 3 };
+	struct TrapGraph trap_graph;
+	generate_linear_trap_graph(2, zone_types, zone_capacities, 0.0, 100.0, ION_HEIGHT, &trap_graph);
+
+	struct TransportCostModel cost_model = default_transport_cost_model();
+	struct CircuitGraph *circuit_graph;
+	struct ScheduleTrace trace = { 0 };
+	struct TransportProgram *program = schedule_text(
+		"qubit[4] qreg;\ncx qreg[0], qreg[1];\nx qreg[2];\ncx qreg[2], qreg[3];\nx qreg[0];\n",
+		&trap_graph, SCHEDULE_STAY, &cost_model, &circuit_graph, &trace
+	);
+
+	int n_wrong = (program == NULL);
+	if (program != NULL)
+	{
+		int n_back = 0;
+		int evicted = 0;
+		for (int m = 0; m < trace.n_moves; m++)
+		{
+			struct IonMove *move = &trace.moves[m];
+			if (move->transport < 0)
+			{
+				n_back++;
+				evicted = move->ion;
+				n_wrong += (move->from_zone != 1) + (move->to_zone != 0);
+			}
+
+			// Ion 1 takes its x where it is
+			if (move->transport == 3)
+				n_wrong += (move->from_zone != 1) + (move->to_zone != 1);
+		}
+
+		n_wrong += (n_back != 1) + (evicted != 2);
+		n_wrong += (check_schedule_trace(&trap_graph, circuit_graph, program, &trace, &cost_model, NULL, 0) != 0);
+
+		free_transport_program(program);
+	}
+
+	free_schedule_trace(&trace);
+	if (circuit_graph != NULL)
+		free_circuit_graph(circuit_graph);
+	free_trap_graph(&trap_graph);
+
+	return check_error("with SCHEDULE_STAY, ions stay where they are, and the one needed last makes room", n_wrong, 0);
 }

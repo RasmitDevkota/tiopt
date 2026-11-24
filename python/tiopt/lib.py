@@ -2598,7 +2598,7 @@ class TrapGraph:
 
 
 # Strategies of the transport scheduler (enum ScheduleStrategy in transport.h)
-SCHEDULE_STRATEGIES = {"baseline": 0, "fast": 1, "rounds": 2, "lookahead": 3, "layer-assign": 4}
+SCHEDULE_STRATEGIES = {"baseline": 0, "fast": 1, "rounds": 2, "lookahead": 3, "layer-assign": 4, "stay": 5}
 
 # Layers ahead which the lookahead strategies look for the next operation of an ion by default
 DEFAULT_LOOKAHEAD_LAYERS = int(constant("DEFAULT_LOOKAHEAD_LAYERS"))
@@ -2692,7 +2692,7 @@ class TransportProgram:
         Args:
             trap_graph: TrapGraph of the zones.
             circuit: Circuit to run.
-            strategy: Strategy of the scheduler (a key of SCHEDULE_STRATEGIES), or None for the default.
+            strategy: Strategy of the scheduler (a key of SCHEDULE_STRATEGIES), or None for the default ("rounds").
             lookahead_layers: With the lookahead and layer-assign strategies, an ion stays in its zone after a layer if
                 its next operation is at most this many layers later and can happen there (at least 1, and
                 DEFAULT_LOOKAHEAD_LAYERS if None).
