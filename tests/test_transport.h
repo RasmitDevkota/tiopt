@@ -84,3 +84,18 @@ int test_commuting_layers
 (
 	double atol
 );
+
+int test_gates_take_chain_in_turn
+(
+	double atol
+);
+
+int test_mid_chain_swap_cost
+(
+	double atol
+);
+
+int test_cycle_breaker_in_storage_zones
+(
+	double atol
+);

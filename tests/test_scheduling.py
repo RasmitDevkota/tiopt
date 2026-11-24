@@ -17,12 +17,12 @@ def circuit(repository):
 def test_circuit_layers(circuit):
     instructions = circuit.instructions
     assert circuit.n_ions == 4
-    assert [i.layer for i in instructions] == [1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5]
+    assert [i.layer for i in instructions] == [1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 5, 5]
     assert [i.targets for i in instructions[4:10]] == [[1, 2], [3, 4], [1, 3], [2, 4], [1, 4], [2, 3]]
-    # The measurement of the whole register follows the last two gates
-    assert instructions[-1].operation == "detect"
-    assert instructions[-1].targets == [1, 2, 3, 4]
-    assert sorted(instructions[-1].previous) == [9, 10]
+    # The measurement of the whole register measures each qubit on its own, after the last gate on it
+    assert [i.operation for i in instructions[10:]] == ["detect"] * 4
+    assert [i.targets for i in instructions[10:]] == [[1], [2], [3], [4]]
+    assert [i.previous for i in instructions[10:]] == [[9], [10], [10], [9]]
 
 
 def test_missing_qasm_file(tmp_path):
@@ -36,11 +36,11 @@ def test_transport_schedule(circuit):
 
     # Times only count distance here
     program = tiopt.TransportProgram(trap_graph, circuit, cost_model=tiopt.distance_cost_model())
-    assert (program.n_ions, program.n_transports) == (4, 11)
+    assert (program.n_ions, program.n_transports) == (4, 14)
     np.testing.assert_allclose(program.initial_positions[:, 0], -150.0)
-    # Gates happen in the gate zone and the measurement in the measure zone
+    # Gates happen in the gate zone and the measurements in the measure zone
     np.testing.assert_allclose(program.destinations[:10, 0], 50.0)
-    assert program.destinations[10, 0] == 150.0
+    np.testing.assert_allclose(program.destinations[10:, 0], 150.0)
     # Each layer arrives in rounds of operations which fit in the gate zone (2 ions) at once, each after the previous
     # round, so the 4 single-qubit gates take 2 rounds and every layer of two-qubit gates takes 2 rounds
     layers = np.array([i.layer for i in circuit.instructions])
@@ -367,3 +367,33 @@ def test_cheaper_swaps(repository):
     assert tiopt.lib._lib.default_transport_cost_model().swap_gates == tiopt.lib.TRANSPORT_SWAP_METHODS["cheaper"]
     with pytest.raises(ValueError):
         tiopt.transport_cost_model(qccd.TimingModel(swap_type="teleport"))
+
+
+@pytest.mark.parametrize("name", ["qft_06", "heisenberg_06", "ghz_12", "qft_12"])
+def test_gates_take_chain_in_turn_on_qccd_architecture(repository, name):
+    from tiopt import qccd
+
+    # The architecture of the comparison with tiopt.qccd: gate traps of 6 hold several gates of a round at once
+    architecture = qccd.Architecture()
+    storage = architecture.add_trap("S", 16, (-200.0, 0.0), gate_zone=False)
+    junction = architecture.add_junction("J", (0.0, 0.0))
+    upper = architecture.add_trap("G1", 6, (150.0, 100.0))
+    lower = architecture.add_trap("G2", 6, (150.0, -100.0))
+    architecture.connect(storage, junction, 200.0)
+    architecture.connect(junction, upper, 180.0)
+    architecture.connect(junction, lower, 180.0)
+
+    # The 12-qubit circuits fit only because each qubit is measured on its own
+    circuit = tiopt.Circuit(repository / "tests" / "quantumcircuits" / "benchmarks" / f"{name}.qasm")
+    for strategy in ["rounds", "lookahead", "layer-assign"]:
+        program = tiopt.TransportProgram(tiopt.TrapGraph.from_architecture(architecture), circuit, strategy)
+        assert program.check() == []
+
+        # An operation on several ions never overlaps another operation in its zone
+        targets = program.targets
+        operations = [s for s in program.steps if s.type == "operation"]
+        for a in operations:
+            for b in operations:
+                if a is b or a.zone != b.zone or max(len(targets[a.index]), len(targets[b.index])) < 2:
+                    continue
+                assert a.end <= b.start + 1e-12 or b.end <= a.start + 1e-12
