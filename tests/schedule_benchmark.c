@@ -29,16 +29,16 @@
 static const char *strategy_names[] = {
 	"baseline", "fast", "rounds", "lookahead", "layer-assign",
 	"lookahead-2", "lookahead-3", "lookahead-6", "layer-assign-2", "layer-assign-3", "layer-assign-6",
-	"rounds-commute", "layer-assign-commute", "layer-assign-2-commute",
+	"rounds-commute", "layer-assign-commute", "layer-assign-2-commute", "stay",
 };
 static const struct ScheduleOptions strategies[] = {
 	{ SCHEDULE_BASELINE, 1 }, { SCHEDULE_FAST, 1 }, { SCHEDULE_ROUNDS, 1 }, { SCHEDULE_LOOKAHEAD, 1 }, { SCHEDULE_LAYER_ASSIGN, 1 },
 	{ SCHEDULE_LOOKAHEAD, 2 }, { SCHEDULE_LOOKAHEAD, 3 }, { SCHEDULE_LOOKAHEAD, 6 },
 	{ SCHEDULE_LAYER_ASSIGN, 2 }, { SCHEDULE_LAYER_ASSIGN, 3 }, { SCHEDULE_LAYER_ASSIGN, 6 },
-	{ SCHEDULE_ROUNDS, 1, 1 }, { SCHEDULE_LAYER_ASSIGN, 1, 1 }, { SCHEDULE_LAYER_ASSIGN, 2, 1 },
+	{ SCHEDULE_ROUNDS, 1, 1 }, { SCHEDULE_LAYER_ASSIGN, 1, 1 }, { SCHEDULE_LAYER_ASSIGN, 2, 1 }, { SCHEDULE_STAY, 1 },
 };
-static const int bases[] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2, 4, 8 };
-#define N_STRATEGIES 14
+static const int bases[] = { -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 2, 4, 8, -1 };
+#define N_STRATEGIES 15
 
 // Every circuit in this directory, made by quantumcircuits/generate_benchmark_circuits.py
 #define CIRCUIT_DIR "quantumcircuits/benchmarks"

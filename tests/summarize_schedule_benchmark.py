@@ -16,7 +16,7 @@ import statistics
 import sys
 from collections import defaultdict
 
-STRATEGIES = ["baseline", "fast", "rounds", "lookahead", "layer-assign"]
+STRATEGIES = ["baseline", "fast", "rounds", "lookahead", "layer-assign", "stay"]
 DEPTHS = [1, 2, 3, 6]
 VARIANTS = [("rounds-commute", "rounds"), ("layer-assign-commute", "layer-assign"), ("layer-assign-2-commute", "layer-assign-2")]
 
@@ -67,6 +67,7 @@ def main():
         ("lookahead", "rounds"),
         ("layer-assign", "rounds"),
         ("layer-assign", "lookahead"),
+        ("stay", "rounds"),
     ]
     header = [f"{new} vs {old}" for new, old in comparisons]
 

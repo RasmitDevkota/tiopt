@@ -99,3 +99,8 @@ int test_cycle_breaker_in_storage_zones
 (
 	double atol
 );
+
+int test_stay_evicts_ion_needed_last
+(
+	double atol
+);

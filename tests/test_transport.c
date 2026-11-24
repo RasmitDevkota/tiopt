@@ -42,6 +42,7 @@ int test_all_transport
 	result += test_gates_take_chain_in_turn(atol);
 	result += test_mid_chain_swap_cost(atol);
 	result += test_cycle_breaker_in_storage_zones(atol);
+	result += test_stay_evicts_ion_needed_last(atol);
 
 	return result;
 }
@@ -1380,4 +1381,60 @@ int test_cycle_breaker_in_storage_zones
 	free_trap_graph(&trap_graph);
 
 	return check_error("full zones which can store ions exchange ions through storage", n_wrong, 0);
+}
+
+int test_stay_evicts_ion_needed_last
+(
+	double atol
+)
+{
+	// A gate zone holds three ions. The first layer brings ions 1 and 2 (for a cx) and ion 3 (for an x) into it, and
+	// with SCHEDULE_STAY they stay there. The cx on ions 3 and 4 of the second layer needs room for ion 4, so one of
+	// ions 1 and 2 moves back into storage: ion 2, which no later operation needs (ion 1 has an x in the third layer,
+	// which it takes where it is)
+	enum ZoneType zone_types[2] = { LOAD_ZONE | STORAGE_ZONE, GATE_ZONE };
+	int zone_capacities[2] = { 4, 3 };
+	struct TrapGraph trap_graph;
+	generate_linear_trap_graph(2, zone_types, zone_capacities, 0.0, 100.0, ION_HEIGHT, &trap_graph);
+
+	struct TransportCostModel cost_model = default_transport_cost_model();
+	struct CircuitGraph *circuit_graph;
+	struct ScheduleTrace trace = { 0 };
+	struct TransportProgram *program = schedule_text(
+		"qubit[4] qreg;\ncx qreg[0], qreg[1];\nx qreg[2];\ncx qreg[2], qreg[3];\nx qreg[0];\n",
+		&trap_graph, SCHEDULE_STAY, &cost_model, &circuit_graph, &trace
+	);
+
+	int n_wrong = (program == NULL);
+	if (program != NULL)
+	{
+		int n_back = 0;
+		int evicted = 0;
+		for (int m = 0; m < trace.n_moves; m++)
+		{
+			struct IonMove *move = &trace.moves[m];
+			if (move->transport < 0)
+			{
+				n_back++;
+				evicted = move->ion;
+				n_wrong += (move->from_zone != 1) + (move->to_zone != 0);
+			}
+
+			// Ion 1 takes its x where it is
+			if (move->transport == 3)
+				n_wrong += (move->from_zone != 1) + (move->to_zone != 1);
+		}
+
+		n_wrong += (n_back != 1) + (evicted != 2);
+		n_wrong += (check_schedule_trace(&trap_graph, circuit_graph, program, &trace, &cost_model, NULL, 0) != 0);
+
+		free_transport_program(program);
+	}
+
+	free_schedule_trace(&trace);
+	if (circuit_graph != NULL)
+		free_circuit_graph(circuit_graph);
+	free_trap_graph(&trap_graph);
+
+	return check_error("with SCHEDULE_STAY, ions stay where they are, and the one needed last makes room", n_wrong, 0);
 }

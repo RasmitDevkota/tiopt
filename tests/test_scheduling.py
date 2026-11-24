@@ -397,3 +397,30 @@ def test_gates_take_chain_in_turn_on_qccd_architecture(repository, name):
                 if a is b or a.zone != b.zone or max(len(targets[a.index]), len(targets[b.index])) < 2:
                     continue
                 assert a.end <= b.start + 1e-12 or b.end <= a.start + 1e-12
+
+
+@pytest.mark.parametrize("name", ["ghz_06", "qft_06", "qaoa_12"])
+def test_stay_leaves_ions_in_place(repository, name):
+    from tiopt import qccd
+
+    architecture = qccd.Architecture()
+    storage = architecture.add_trap("S", 16, (-200.0, 0.0), gate_zone=False)
+    junction = architecture.add_junction("J", (0.0, 0.0))
+    upper = architecture.add_trap("G1", 6, (150.0, 100.0))
+    lower = architecture.add_trap("G2", 6, (150.0, -100.0))
+    architecture.connect(storage, junction, 200.0)
+    architecture.connect(junction, upper, 180.0)
+    architecture.connect(junction, lower, 180.0)
+
+    circuit = tiopt.Circuit(repository / "tests" / "quantumcircuits" / "benchmarks" / f"{name}.qasm")
+    rounds = tiopt.TransportProgram(tiopt.TrapGraph.from_architecture(architecture), circuit, "rounds")
+    stay = tiopt.TransportProgram(tiopt.TrapGraph.from_architecture(architecture), circuit, "stay")
+    assert stay.check() == []
+
+    # Ions go back into storage only to make room, so there are fewer moves and the program is shorter
+    def moved(program):
+        return [m for m in program.moves if m.from_zone != m.to_zone]
+
+    assert len(moved(stay)) < len(moved(rounds))
+    assert sum(m.transport < 0 for m in moved(stay)) < sum(m.transport < 0 for m in moved(rounds))
+    assert stay.duration < rounds.duration

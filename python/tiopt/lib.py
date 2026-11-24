@@ -2598,7 +2598,7 @@ class TrapGraph:
 
 
 # Strategies of the transport scheduler (enum ScheduleStrategy in transport.h)
-SCHEDULE_STRATEGIES = {"baseline": 0, "fast": 1, "rounds": 2, "lookahead": 3, "layer-assign": 4}
+SCHEDULE_STRATEGIES = {"baseline": 0, "fast": 1, "rounds": 2, "lookahead": 3, "layer-assign": 4, "stay": 5}
 
 # Layers ahead which the lookahead strategies look for the next operation of an ion by default
 DEFAULT_LOOKAHEAD_LAYERS = int(constant("DEFAULT_LOOKAHEAD_LAYERS"))
