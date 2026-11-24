@@ -13,14 +13,16 @@ enum ScheduleStrategy
                         // (or within ScheduleOptions.lookahead_layers layers) and can happen there
     SCHEDULE_LAYER_ASSIGN, // as SCHEDULE_LOOKAHEAD, but the operations of each round are assigned to zones together,
                            // to minimize the longest transport of the round
-    SCHEDULE_STAY, // as SCHEDULE_ROUNDS, but ions stay where they are after each operation instead of going back into
-                   // storage (as in tiopt.qccd), so that an operation usually brings one ion to where its partner is;
-                   // when no zone of its type has room, the ions which the round does not need are moved into storage,
-                   // those whose next operation comes last first
+    SCHEDULE_STAY, // the default: as SCHEDULE_ROUNDS, but ions stay where they are after each operation instead of
+                   // going back into storage (as in tiopt.qccd), so that an operation usually brings one ion to where
+                   // its partner is; when no zone of its type has room, ions are moved into storage, those whose next
+                   // operation comes last first, and those which a later operation of the layer needs only if nothing
+                   // else of the round could happen
 };
 
+// Strategy which generate_transport_schedule and TransportProgram use when none is given
 #ifndef DEFAULT_SCHEDULE_STRATEGY
-#define DEFAULT_SCHEDULE_STRATEGY SCHEDULE_ROUNDS
+#define DEFAULT_SCHEDULE_STRATEGY SCHEDULE_STAY
 #endif
 
 // Number of layers ahead which SCHEDULE_LOOKAHEAD and SCHEDULE_LAYER_ASSIGN look for the next operation of an ion when

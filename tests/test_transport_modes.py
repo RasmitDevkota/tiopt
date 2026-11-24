@@ -13,7 +13,8 @@ def program(tmp_path_factory):
     circuits.write_scheduler_qasm(circuits.parse_qasm(circuits.PRESETS["GHZ (3 qubits)"]), path)
     circuit = tiopt.Circuit(path)
     graph = tiopt.TrapGraph.from_layout(tiopt.lib.DEFAULT_LAYOUT, 100.0, circuit.n_ions)
-    return circuit, graph, tiopt.TransportProgram(graph, circuit)
+    # Rounds, so that the ions go back into storage between operations and the plans have those moves to time
+    return circuit, graph, tiopt.TransportProgram(graph, circuit, "rounds")
 
 
 def test_excitation_of_minimum_jerk_transports():

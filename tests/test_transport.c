@@ -177,7 +177,8 @@ int test_generate_transport_schedule
 
 	// Times only count distance here
 	struct TransportCostModel cost_model = distance_transport_cost_model();
-	struct ScheduleOptions options = { DEFAULT_SCHEDULE_STRATEGY, DEFAULT_LOOKAHEAD_LAYERS, 0, &cost_model };
+	// Rounds, whose ions go back into storage after each layer (the default, SCHEDULE_STAY, leaves them in place)
+	struct ScheduleOptions options = { SCHEDULE_ROUNDS, DEFAULT_LOOKAHEAD_LAYERS, 0, &cost_model };
 
 	struct TransportProgram *transport_program = malloc(sizeof(struct TransportProgram));
 	struct ScheduleTrace trace = { 0 };

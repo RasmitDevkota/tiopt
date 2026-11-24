@@ -35,7 +35,8 @@ def test_transport_schedule(circuit):
     np.testing.assert_allclose(trap_graph.positions[:, 0], np.linspace(-150, 150, 7))
 
     # Times only count distance here
-    program = tiopt.TransportProgram(trap_graph, circuit, cost_model=tiopt.distance_cost_model())
+    # Rounds, whose ions go back into storage after each layer (the default, stay, leaves them in place)
+    program = tiopt.TransportProgram(trap_graph, circuit, "rounds", cost_model=tiopt.distance_cost_model())
     assert (program.n_ions, program.n_transports) == (4, 14)
     np.testing.assert_allclose(program.initial_positions[:, 0], -150.0)
     # Gates happen in the gate zone and the measurements in the measure zone
