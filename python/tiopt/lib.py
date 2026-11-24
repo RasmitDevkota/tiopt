@@ -2692,7 +2692,7 @@ class TransportProgram:
         Args:
             trap_graph: TrapGraph of the zones.
             circuit: Circuit to run.
-            strategy: Strategy of the scheduler (a key of SCHEDULE_STRATEGIES), or None for the default ("stay").
+            strategy: Strategy of the scheduler (a key of SCHEDULE_STRATEGIES), or None for the default ("rounds").
             lookahead_layers: With the lookahead and layer-assign strategies, an ion stays in its zone after a layer if
                 its next operation is at most this many layers later and can happen there (at least 1, and
                 DEFAULT_LOOKAHEAD_LAYERS if None).
