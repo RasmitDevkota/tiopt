@@ -44,7 +44,8 @@ enum TransportGateModel
 enum TransportSwapMethod
 {
     SWAP_PHYSICAL, // swapping places with each ion on the way (a rotation each, with a split and a merge on each side
-                   // of the pair where the chain goes on: one at the end of the chain and two in its middle)
+                   // of the pair where the chain goes on: two in the middle of the chain, and otherwise one, as in
+                   // tiopt.qccd)
     SWAP_GATES, // a SWAP gate (three two-qubit gates) with the ion at the end (the "gate" swaps of tiopt.qccd)
     SWAP_CHEAPER, // whichever costs the schedule less fidelity, by the estimate of swap_gate_is_cheaper in circuits.c
 };
@@ -60,8 +61,8 @@ struct TransportCostModel
     double merge; // merging an ion into the end of a chain (s)
     double junction_y; // crossing a junction of three segments (s)
     double junction_x; // crossing a junction of four or more segments (s)
-    double rotation; // rotating two neighboring ions to swap them, which also takes a split and a merge on each side
-                     // of the pair where the chain goes on (s)
+    double rotation; // rotating two neighboring ions to swap them, which also takes a split and a merge (two of each
+                     // in the middle of a chain, where the pair is split off on both sides) (s)
     int swap_gates; // enum TransportSwapMethod: how an ion reaches the end of its chain in a zone where gates can be
                     // done (elsewhere, it always swaps places with each ion on the way)
     int gate_model; // enum TransportGateModel

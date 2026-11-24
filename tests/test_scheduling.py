@@ -385,7 +385,7 @@ def test_gates_take_chain_in_turn_on_qccd_architecture(repository, name):
 
     # The 12-qubit circuits fit only because each qubit is measured on its own
     circuit = tiopt.Circuit(repository / "tests" / "quantumcircuits" / "benchmarks" / f"{name}.qasm")
-    for strategy in ["rounds", "lookahead", "layer-assign"]:
+    for strategy in ["rounds", "lookahead", "layer-assign", "stay"]:
         program = tiopt.TransportProgram(tiopt.TrapGraph.from_architecture(architecture), circuit, strategy)
         assert program.check() == []
 
@@ -424,3 +424,40 @@ def test_stay_leaves_ions_in_place(repository, name):
     assert len(moved(stay)) < len(moved(rounds))
     assert sum(m.transport < 0 for m in moved(stay)) < sum(m.transport < 0 for m in moved(rounds))
     assert stay.duration < rounds.duration
+
+
+def test_stay_keeps_ions_which_the_round_needs(repository):
+    # Making room in a full gate zone for qft_06 used to send ion 3 into storage, although a later operation of the same
+    # round brought it straight back out; ions which the round needs now stay where they are
+    circuit = tiopt.Circuit(repository / "tests" / "quantumcircuits" / "benchmarks" / "qft_06.qasm")
+    program = tiopt.TransportProgram(tiopt.TrapGraph.from_layout("load+storage, gate x3, measure", 100.0, 6), circuit, "stay")
+    assert program.check() == []
+
+    rounds = program.rounds
+    moves = program.moves
+    for k, move in enumerate(moves):
+        if move.transport >= 0 or move.from_zone == move.to_zone:
+            continue
+        # A move back into storage belongs to the round of the next transport
+        later = [m for m in moves[k + 1:] if m.transport >= 0]
+        if later:
+            round_ = rounds[later[0].transport]
+            assert not any(m.ion == move.ion and rounds[m.transport] == round_ for m in later)
+
+
+def test_layer_assign_breaks_cycles_of_full_zones(tmp_path):
+    # Two full gate zones (of 2 ions) behind junctions exchange ions; one eviction was not always enough, and the
+    # scheduler then put 3 ions in a zone for 2
+    graph = tiopt.TrapGraph.from_segments(
+        ["load+storage", "junction", "junction", "gate", "gate+measure", "measure"], [6, 0, 0, 2, 2, 2],
+        [(-200, 0), (0, 0), (150, 0), (300, 0), (300, 50), (150, 100)], [(0, 1), (1, 2), (2, 3), (2, 4), (1, 5)],
+    )
+    qasm = tmp_path / "cycle.qasm"
+    qasm.write_text(
+        "qubit[5] qreg;\ncx qreg[3], qreg[0];\nh qreg[3];\ncx qreg[0], qreg[3];\ncx qreg[0], qreg[3];\n"
+        "cx qreg[3], qreg[1];\nh qreg[0];\nh qreg[0];\nh qreg[0];\nh qreg[1];\ncx qreg[0], qreg[3];\n"
+        "cx qreg[1], qreg[4];\ncx qreg[0], qreg[3];\ncx qreg[4], qreg[1];\ncx qreg[2], qreg[3];\n"
+        + "".join(f"x qreg[{q}];\n" for q in range(5))
+    )
+    program = tiopt.TransportProgram(graph, tiopt.Circuit(str(qasm)), "layer-assign")
+    assert program.check() == []

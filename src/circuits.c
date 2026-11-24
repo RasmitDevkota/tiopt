@@ -697,8 +697,9 @@ static void remove_from_chain
 }
 
 // Splits (and as many merges) which physically swapping the neighbors at positions first and first + 1 of a chain of
-// n_ions takes: the pair is split off the rest of the chain, rotated, and merged back, which takes one split on each
-// side where the chain goes on, so two in the middle of the chain and one at its end
+// n_ions takes: the pair is split off the rest of the chain, rotated, and merged back, which takes a split on each side
+// where the chain goes on, so two in the middle of the chain; a swap takes at least one split and merge, as in
+// tiopt.qccd, also at the end of the chain and in a chain of only the two ions
 static int ion_swap_splits
 (
 	int n_ions,
